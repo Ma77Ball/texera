@@ -29,8 +29,8 @@ services:
       - MINIO_ROOT_PASSWORD=password
     command: server --console-address ":9001" /data
 #   Below lines are recommended to uncomment in order to persist your data even if the container dies
-#    volumes:
-#      - /path/to/your/local/directory:/data
+    volumes:
+      - /home/matt/texera_minio:/data
 
   postgres:
     image: postgres:15
@@ -46,8 +46,8 @@ services:
       retries: 5
       start_period: 5s
 #   Ditto
-#    volumes:
-#      - /path/to/your/local/directory:/var/lib/postgresql/data
+    volumes:
+      - /home/matt/texera_postgress:/var/lib/postgresql/data
 
   lakefs:
     image: treeverse/lakefs:1.51
