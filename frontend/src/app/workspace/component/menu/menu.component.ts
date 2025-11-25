@@ -56,6 +56,8 @@ import { ComputingUnitSelectionComponent } from "../power-button/computing-unit-
 import { GuiConfigService } from "../../../common/service/gui-config.service";
 import { DashboardWorkflowComputingUnit } from "../../types/workflow-computing-unit";
 import { Privilege } from "../../../dashboard/type/share-access.interface";
+import { SupabaseService } from "src/app/supabase.service";
+import { ChatGptService } from "src/app/chatgpt.service";
 
 /**
  * MenuComponent is the top level menu bar that shows
@@ -140,6 +142,8 @@ export class MenuComponent implements OnInit, OnDestroy {
     private modalService: NzModalService,
     private reportGenerationService: ReportGenerationService,
     private panelService: PanelService,
+    private supabaseService: SupabaseService,
+    private chatGptService: ChatGptService,
     private computingUnitStatusService: ComputingUnitStatusService,
     protected config: GuiConfigService
   ) {
@@ -710,16 +714,206 @@ export class MenuComponent implements OnInit, OnDestroy {
       });
   }
 
+  parseKiValue(value: any): number | null {
+    const match = typeof value === "string" ? value.match(/^(\d+(?:\.\d+)?)\s*Ki?$/i) : null;
+    if (match) return parseFloat(match[1]);
+    if (!isNaN(Number(value))) return Number(value);
+    return null;
+  }
+  parseNValue(value: any): number | null {
+    const match = typeof value === "string" ? value.match(/^(\d+(?:\.\d+)?)\s*n?$/i) : null;
+    if (match) return parseFloat(match[1]);
+    if (!isNaN(Number(value))) return Number(value);
+    return null;
+  }
+
   /**
    * Attempts to run a workflow based on the current state.
    * If no computing unit is selected but the feature is enabled,
    * it will first create and connect to a new computing unit.
    */
-  runWorkflow(): void {
+  async runWorkflow(): Promise<void> {
+    console.log("testing that it calls ai")
+    let useAI = true;
+    if (useAI) {
+      const prompt = `
+You are an intelligent and expert-level scheduling assistant for a distributed data processing platform called **Texera**. Texera executes complex workflows consisting of multiple operators (e.g., Scan, Join, Aggregate) across a dynamic pool of compute units. Your responsibility is to select the most optimal compute unit to execute a given workflow by considering system load, historical usage patterns, workflow complexity, and resource availability.
+
+Texera uses a push-based dataflow model and is optimized for hybrid workflows that combine relational operators with user-defined functions (UDFs). Operators can vary significantly in computational and memory demands. Compute units may be heterogeneous, with differences in CPU core count, memory capacity, and current resource usage.
+
+Your decision should be guided by intelligent load-balancing strategies such as:
+
+- **Least-Loaded First**: Prefer compute units with the lowest normalized (relative) CPU and memory load.
+- **Resource Fit**: Select a unit with sufficient available CPU and memory to meet the workload’s peak or average resource needs.
+- **Smart Utilization**: Avoid assigning heavy workflows to units nearing saturation; avoid wasting powerful nodes on lightweight workflows.
+- **Data Locality (if available)**: Consider the dataset location, if known, to reduce transfer overhead.
+- **Efficiency Awareness**: Prefer units that historically completed similar workflows efficiently.
+
+You will receive the following inputs:
+
+1. **Available Compute Units** — an array of objects:
+   \${computeUnits}
+   // Example format:
+   // [
+   //   "173":{"cuid":173,"name":"cu4","cpuLimit":"4","memoryLimit":"4Gi","cpuUsage":"0.94073","memoryUsage":"1.39819"},
+   //   ...
+   // ]
+   // Note: cpuLoad and cpuCores are in *cores*. Memory values are in *Gi*.
+
+2. **Workflow Metadata**:
+   - Dataset Name: \${datasetName}
+   - Number of Tuples: \${datasetTupleCount}
+   - Workflow Operators: \${workflowOperators}
+     // Example: [ "Scan", "Filter", "Join", "Aggregate" ]
+
+3. **Aggregated Past Workflow Execution Stats**:
+   - Max CPU Usage (cores): \${maxCpuUsage}
+   - Max Memory Usage (Gi): \${maxMemUsage}
+   - Start CPU Usage (cores): \${startCpuUsage}
+   - Start Memory Usage (Gi): \${startMemUsage}
+   - End CPU Usage (cores): \${endCpuUsage}
+   - End Memory Usage (Gi): \${endMemUsage}
+   - Average CPU Usage (cores): \${avgCpuUsage}
+   - Average Memory Usage (Gi): \${avgMemUsage}
+
+### Instructions:
+
+1. Analyze current load (CPU and memory) relative to total capacity (i.e., normalize).
+2. Estimate the expected resource consumption based on past stats and operator types.
+3. Avoid overloading a compute unit, even if it has the lowest raw load.
+4. Aim to balance the cluster by making resource-conscious and forward-thinking decisions.
+
+### Response Format:
+
+Respond with exactly **two lines**:
+
+**Line 1**: The UID of the selected compute unit (just the number).
+**Line 2**: A concise technical explanation of why this unit was chosen (e.g., normalized resource load, expected workflow demand, operator cost, etc.).
+
+#### Example:
+123
+Selected for its low normalized CPU (0.25) and memory (6%) usage, providing headroom for an operator-heavy workflow with historically high memory demand.
+`;
+
+      const computeUnitMap: { [cuid: number]: any } = {};
+
+      this.computingUnitSelectionComponent.allComputingUnits.forEach(computeUnit => {
+        const cuid = computeUnit.computingUnit.cuid;
+        const rawCpuUsage = this.parseNValue(computeUnit.metrics.cpuUsage);
+        const rawMemoryUsage = this.parseKiValue(computeUnit.metrics.memoryUsage);
+        const cpuUsage = isFinite(Number(rawCpuUsage)) ? Number(rawCpuUsage) / 1_000_000_000 : 0;
+        const memoryUsage = isFinite(Number(rawMemoryUsage)) ? Number(rawMemoryUsage) / 1_048_576 : 0;
+
+        computeUnitMap[cuid] = {
+          cuid: cuid,
+          name: computeUnit.computingUnit.name,
+          cpuLimit: computeUnit.computingUnit.resource.cpuLimit,
+          memoryLimit: computeUnit.computingUnit.resource.memoryLimit,
+          cpuUsage: cpuUsage?.toFixed(5),
+          memoryUsage: memoryUsage?.toFixed(5),
+        };
+      });
+      // get other data and send to ml here or do heuristic
+      console.log("Compute Unit Map:", computeUnitMap);
+
+      const logicalPlan = ExecuteWorkflowService.getLogicalPlanRequest(this.workflowActionService.getTexeraGraph());
+      const operatorTypes: string[] = Object.values(logicalPlan.operators).map(op => op.operatorType);
+      console.log(operatorTypes);
+
+      interface Dataset {
+        name: string;
+        tupleCount: number;
+      }
+
+      const datasetAllocation: { [key: number]: Dataset } = {
+        52: { name: "tiktok.csv", tupleCount: 6746 },
+        57: { name: "iris.csv", tupleCount: 150 },
+        2: { name: "iris.csv", tupleCount: 1500 },
+        1: { name: "TMDb_updated.csv", tupleCount: 1000 },
+        0: { name: "TMDb_updated.csv", tupleCount: 1000 },
+      };
+      const workflowId: number | undefined = this.workflowId;
+      if (workflowId === undefined) {
+        this.notificationService.error("Workflow ID is undefined.");
+        return;
+      }
+      let stats = await this.supabaseService.getAggregatedWorkflowStats(workflowId as number);
+      if (!stats || stats === null) {
+        this.notificationService.warning("No historical stats found — using default values.");
+      }
+      const safeStats = stats ?? {
+        maxCpuUsage: 4,
+        maxMemUsage: 5,
+        startCpuUsage: 0.1,
+        startMemUsage: 1,
+        endCpuUsage: 4,
+        endMemUsage: 2,
+        avgCpuUsage: 0.3,
+        avgMemUsage: 2.5,
+      };
+      const promptFinal = prompt
+        .replace("${computeUnits}", JSON.stringify(computeUnitMap))
+        .replace("${datasetName}", datasetAllocation[workflowId as number].name)
+        .replace("${datasetTupleCount}", datasetAllocation[workflowId as number].tupleCount.toString())
+        .replace("${workflowOperators}", JSON.stringify(operatorTypes))
+        .replace("${maxCpuUsage}", safeStats.maxCpuUsage.toString())
+        .replace("${maxMemUsage}", (safeStats.maxMemUsage / 1_000_000_000).toString())
+        .replace("${startCpuUsage}", safeStats.startCpuUsage.toString())
+        .replace("${startMemUsage}", (safeStats.startMemUsage / 1_000_000_000).toString())
+        .replace("${endCpuUsage}", safeStats.endCpuUsage.toString())
+        .replace("${endMemUsage}", (safeStats.endMemUsage / 1_000_000_000).toString())
+        .replace("${avgCpuUsage}", safeStats.avgCpuUsage.toString())
+        .replace("${avgMemUsage}", (safeStats.avgMemUsage / 1_000_000_000).toString());
+
+      console.log(promptFinal);
+      let result;
+      try {
+        this.notificationService.info("Calling ChatGPT to choose a compute unit...");
+        result = await this.chatGptService.getOptimalComputeUnit(promptFinal);
+        console.log("ChatGPT UID:", result.uid);
+        console.log("Reasoning:", result.explanation);
+        this.notificationService.success("Received UID from ChatGPT.");
+      } catch (err) {
+        console.error("ChatGPT call failed:", err);
+        this.notificationService.error("ChatGPT call failed. See console for details.");
+        return;
+      }
+
+      const parsedUid = Number(result.uid);
+
+      if (isNaN(parsedUid)) {
+        this.notificationService.error("ChatGPT returned an invalid UID.");
+        return;
+      }
+
+      const unit = await this.computingUnitSelectionComponent.allComputingUnits.find(
+        unit => unit.computingUnit.cuid === parsedUid
+      );
+
+      if (unit) {
+        this.computingUnitSelectionComponent.selectComputingUnit(this.workflowId, unit.computingUnit.cuid ?? null);
+      } else {
+        this.notificationService.error(`No compute unit found with UID: ${parsedUid}`);
+      }
+    }
+
     // Use the existing flags that were already updated via subscriptions
     if (!this.isWorkflowValid || this.isWorkflowEmpty) {
       return;
     }
+
+    // this.computingUnitStatusService
+    //   .getCpuUsagePercentage(false)
+    //   .pipe(take(1))
+    //   .subscribe(cpuUsage => {
+    //     console.log("Workflow start cpu usage: ", cpuUsage);
+    //   });
+    // this.computingUnitStatusService
+    //   .getMemoryUsagePercentage(false)
+    //   .pipe(take(1))
+    //   .subscribe(cpuUsage => {
+    //     console.log("Workflow start memory usage: ", cpuUsage);
+    //   });
 
     // If computing unit manager is enabled and no computing unit is selected
     if (this.computingUnitStatus === ComputingUnitState.NoComputingUnit) {
@@ -736,11 +930,28 @@ export class MenuComponent implements OnInit, OnDestroy {
       return;
     }
 
+    // console.log(this.ExecutionState);
+
     // Regular workflow execution - already connected
     this.executeWorkflowService.executeWorkflowWithEmailNotification(
       this.currentExecutionName || "Untitled Execution",
       this.config.env.workflowEmailNotificationEnabled
     );
+    // const workflowStateSubscription = this.executeWorkflowService
+    //   .getExecutionStateStream()
+    //   .pipe(untilDestroyed(this))
+    //   .subscribe(({ current }) => {
+    //     if (current.state === ExecutionState.Completed) {
+    //       console.log("Execution finished");
+    //     }
+    //     if (
+    //       current.state === ExecutionState.Completed ||
+    //       current.state === ExecutionState.Failed ||
+    //       current.state === ExecutionState.Killed
+    //     ) {
+    //       workflowStateSubscription.unsubscribe();
+    //     }
+    //   });
   }
 
   protected readonly Privilege = Privilege;

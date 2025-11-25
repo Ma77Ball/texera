@@ -214,9 +214,9 @@ texeraEnvVars:
   - name: MAX_NUM_OF_RUNNING_COMPUTING_UNITS_PER_USER
     value: "10"
   - name: KUBERNETES_COMPUTING_UNIT_CPU_LIMIT_OPTIONS
-    value: "2"
+    value: "1, 2, 3, 4"
   - name: KUBERNETES_COMPUTING_UNIT_MEMORY_LIMIT_OPTIONS
-    value: "2Gi"
+    value: "1Gi, 2Gi, 3Gi, 4Gi"
   - name: KUBERNETES_COMPUTING_UNIT_GPU_LIMIT_OPTIONS
     value: "0"
   - name: COMPUTING_UNIT_LOCAL_ENABLED
