@@ -62,29 +62,46 @@ jobs:
             const forkBranch = pr.head.ref;
             const CHECK_NAME = 'Fork CI';
 
-            // Give the contributor's fork a moment to register the push-
-            // triggered workflow run before we query it.
-            core.info(`Waiting 15s for fork workflow run to register…`);
-            await new Promise(r => setTimeout(r, 15000));
-
-            // Locate the Fork CI workflow run for this exact commit SHA in
-            // the contributor's fork. We filter by name and SHA rather than
-            // workflow file path so the lookup is resilient to file renames.
+            // Poll the fork for the matching workflow run. GitHub can take
+            // up to ~90s to register a run after a push, so we retry with
+            // backoff rather than doing a single fixed wait.
+            // Budget: 15s + 20s + 25s + 30s + 30s = ~2 min total.
+            const DELAYS_MS = [15000, 20000, 25000, 30000, 30000];
             let forkRun = null;
-            try {
-              const { data } = await github.rest.actions.listWorkflowRunsForRepo({
-                owner: forkOwner,
-                repo:  forkRepo,
-                event: 'push',
-                per_page: 20,
-              });
-              forkRun = data.workflow_runs.find(
-                r => r.head_sha === headSha && r.name === CHECK_NAME
-              ) ?? null;
-            } catch (err) {
+
+            for (let attempt = 0; attempt < DELAYS_MS.length; attempt++) {
               core.info(
-                `Could not list workflow runs in ${forkOwner}/${forkRepo}: ` +
-                `${err.message}. Actions may be disabled on the fork.`
+                `Waiting ${DELAYS_MS[attempt] / 1000}s before attempt ` +
+                `${attempt + 1}/${DELAYS_MS.length}…`
+              );
+              await new Promise(r => setTimeout(r, DELAYS_MS[attempt]));
+
+              try {
+                const { data } = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner:    forkOwner,
+                  repo:     forkRepo,
+                  event:    'push',
+                  per_page: 20,
+                });
+                forkRun = data.workflow_runs.find(
+                  r => r.head_sha === headSha && r.name === CHECK_NAME
+                ) ?? null;
+              } catch (err) {
+                core.info(
+                  `Attempt ${attempt + 1}: could not list runs in ` +
+                  `${forkOwner}/${forkRepo}: ${err.message}`
+                );
+              }
+
+              if (forkRun) {
+                core.info(
+                  `Found fork run #${forkRun.id} on attempt ${attempt + 1}.`
+                );
+                break;
+              }
+              core.info(
+                `Attempt ${attempt + 1}: no matching run for SHA ` +
+                `${headSha.slice(0, 7)} yet.`
               );
             }
 

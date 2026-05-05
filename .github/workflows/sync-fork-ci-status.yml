@@ -17,11 +17,16 @@
 
 # Sync Fork CI Status — Apache Spark model (step 3 of 3)
 #
-# Runs on a 5-minute cron schedule in the canonical apache/texera repository.
-# For every open fork PR it finds the "Fork CI" check_run created by
-# notify-fork-ci.yml, queries the contributor's fork for the current run
-# status, and updates the check_run so committers always see an up-to-date
-# result without refreshing.
+# Keeps the "Fork CI" check_run on each open fork PR up to date by querying
+# the contributor's fork for the current workflow run status.
+#
+# Triggers:
+#   - workflow_run on "Notify Fork CI" completed: fires immediately after the
+#     check_run is created, catching fork runs that finish quickly.
+#   - workflow_run on "Required Checks" completed: catches the case where a
+#     PR just merged and remaining fork PRs need a final status sweep.
+#   - cron every 5 min: safety net for any events missed above.
+#   - workflow_dispatch: manual trigger for testing.
 #
 # State machine:
 #   queued / in_progress  →  keep polling; update status only
@@ -31,22 +36,18 @@
 # The fork run coordinates (fork_owner, fork_repo, fork_run_id) are embedded
 # as JSON in the check_run's output.text by notify-fork-ci.yml and parsed back
 # out here. No external state store is needed.
-#
-# The GITHUB_TOKEN is sufficient for all API calls:
-#   - checks:write    to update the check_run in the main repo
-#   - pull-requests:read  to list open PRs
-#   - The fork's Actions API is public (no fork token needed for public forks)
 
 name: Sync Fork CI Status
 
 on:
+  # Fire immediately when notify-fork-ci.yml finishes creating the check.
+  # This catches fork runs that are already done or complete quickly, so the
+  # PR check updates in seconds rather than waiting for the next cron tick.
+  workflow_run:
+    workflows: ['Notify Fork CI', 'Required Checks']
+    types: [completed]
   schedule:
     - cron: '*/5 * * * *'
-  # Also trigger when Required Checks finishes — if the head PR just merged,
-  # kick the sync so leftover fork PRs are marked promptly.
-  workflow_run:
-    workflows: ['Required Checks']
-    types: [completed]
   workflow_dispatch:
 
 permissions:
