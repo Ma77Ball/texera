@@ -1,0 +1,154 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Notify Fork CI — Apache Spark model (step 2 of 3)
+#
+# Fires in the canonical apache/texera repo whenever a PR from a fork is
+# opened, reopened, or updated. It locates the corresponding "Fork CI"
+# workflow run in the contributor's fork (triggered by fork-ci.yml on push)
+# and creates a check_run on the PR's head SHA that committers can inspect.
+#
+# If the fork has GitHub Actions disabled or the push has not yet started a
+# run, the check is set to action_required with instructions so the PR is
+# visibly blocked until the contributor enables Actions and re-pushes.
+#
+# The output.text field of the check_run stores JSON with the fork coordinates
+# (fork_owner, fork_repo, fork_run_id). sync-fork-ci-status.yml reads this
+# every few minutes to keep the check status current as the fork run progresses.
+#
+# Security: pull_request_target runs with the base repo's token and write
+# permissions. No code from the fork is checked out or executed here; only
+# GitHub REST API calls are made.
+
+name: Notify Fork CI
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  checks: write
+  pull-requests: read
+
+jobs:
+  create-check:
+    # Only meaningful for PRs that originate from a fork.
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Locate fork CI run and create PR check
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const pr        = context.payload.pull_request;
+            const headSha   = pr.head.sha;
+            const forkOwner = pr.head.repo.owner.login;
+            const forkRepo  = pr.head.repo.name;
+            const forkBranch = pr.head.ref;
+            const CHECK_NAME = 'Fork CI';
+
+            // Give the contributor's fork a moment to register the push-
+            // triggered workflow run before we query it.
+            core.info(`Waiting 15s for fork workflow run to register…`);
+            await new Promise(r => setTimeout(r, 15000));
+
+            // Locate the Fork CI workflow run for this exact commit SHA in
+            // the contributor's fork. We filter by name and SHA rather than
+            // workflow file path so the lookup is resilient to file renames.
+            let forkRun = null;
+            try {
+              const { data } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner: forkOwner,
+                repo:  forkRepo,
+                event: 'push',
+                per_page: 20,
+              });
+              forkRun = data.workflow_runs.find(
+                r => r.head_sha === headSha && r.name === CHECK_NAME
+              ) ?? null;
+            } catch (err) {
+              core.info(
+                `Could not list workflow runs in ${forkOwner}/${forkRepo}: ` +
+                `${err.message}. Actions may be disabled on the fork.`
+              );
+            }
+
+            if (forkRun) {
+              core.info(
+                `Found fork run #${forkRun.id} ` +
+                `(status=${forkRun.status}) in ${forkOwner}/${forkRepo}.`
+              );
+              await github.rest.checks.create({
+                owner, repo,
+                name:        CHECK_NAME,
+                head_sha:    headSha,
+                status:      'in_progress',
+                details_url: forkRun.html_url,
+                output: {
+                  title:   'Fork CI in progress',
+                  summary: `CI is running in the contributor's fork: ` +
+                           `[${forkOwner}/${forkRepo}](${forkRun.html_url}).\n\n` +
+                           `This check updates every few minutes as the fork run progresses.`,
+                  // sync-fork-ci-status.yml parses this JSON to locate the run.
+                  text: JSON.stringify({
+                    fork_owner:  forkOwner,
+                    fork_repo:   forkRepo,
+                    fork_run_id: forkRun.id,
+                  }),
+                },
+              });
+            } else {
+              core.info(
+                `No Fork CI run found for SHA ${headSha} in ` +
+                `${forkOwner}/${forkRepo}. Creating action_required check.`
+              );
+              const enableUrl =
+                `https://github.com/${forkOwner}/${forkRepo}/actions`;
+              await github.rest.checks.create({
+                owner, repo,
+                name:        CHECK_NAME,
+                head_sha:    headSha,
+                status:      'completed',
+                conclusion:  'action_required',
+                output: {
+                  title:   'Fork CI not found',
+                  summary: [
+                    `No **Fork CI** run was detected in \`${forkOwner}/${forkRepo}\``,
+                    `for commit \`${headSha.slice(0, 7)}\`.`,
+                    '',
+                    '**Why:** GitHub Actions may be disabled in your fork, or the',
+                    'push event did not trigger the workflow.',
+                    '',
+                    '**How to fix:**',
+                    `1. Open your fork's Actions tab: ${enableUrl}`,
+                    '2. If prompted, click **"I understand my workflows, go ahead and enable them"**.',
+                    '3. Push a new commit to your branch (an empty commit works):',
+                    '   ```',
+                    '   git commit --allow-empty -m "ci: trigger fork CI"',
+                    '   git push',
+                    '   ```',
+                    '4. Re-open or push to this PR once Fork CI is green.',
+                  ].join('\n'),
+                  text: JSON.stringify({
+                    fork_owner:  forkOwner,
+                    fork_repo:   forkRepo,
+                    fork_run_id: null,
+                  }),
+                },
+              });
+            }
