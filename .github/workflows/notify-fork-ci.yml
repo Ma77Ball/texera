@@ -124,9 +124,9 @@ jobs:
                 name:        CHECK_NAME,
                 head_sha:    headSha,
                 status:      'completed',
-                conclusion:  'action_required',
+                conclusion:  'failure',
                 output: {
-                  title:   'Fork CI not found',
+                  title:   'Fork CI not found — action required',
                   summary: [
                     `No **Fork CI** run was detected in \`${forkOwner}/${forkRepo}\``,
                     `for commit \`${headSha.slice(0, 7)}\`.`,
@@ -142,7 +142,6 @@ jobs:
                     '   git commit --allow-empty -m "ci: trigger fork CI"',
                     '   git push',
                     '   ```',
-                    '4. Re-open or push to this PR once Fork CI is green.',
                   ].join('\n'),
                   text: JSON.stringify({
                     fork_owner:  forkOwner,
