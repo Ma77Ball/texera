@@ -93,13 +93,20 @@ jobs:
                   branch:   forkBranch,
                   per_page: 30,
                 });
-                // Log what we see so a SHA mismatch is immediately visible in logs.
+                // Log every run so a missing or SHA-mismatched Fork CI is
+                // immediately visible in the Actions log.
                 core.info(
-                  `Attempt ${i + 1}: API returned ${data.workflow_runs.length} run(s). ` +
-                  `Looking for SHA ${headSha}.`
+                  `Attempt ${i + 1}: ${data.workflow_runs.length} run(s) on branch ` +
+                  `"${forkBranch}" in ${forkOwner}/${forkRepo}. ` +
+                  `Searching for name="${CHECK_NAME}" sha=${headSha}.`
                 );
-                for (const r of data.workflow_runs.slice(0, 5)) {
-                  core.info(`  run #${r.id} name="${r.name}" sha=${r.head_sha} status=${r.status}`);
+                for (const r of data.workflow_runs) {
+                  const mark = r.name === CHECK_NAME
+                    ? (r.head_sha === headSha ? '✓' : '~ (SHA mismatch)')
+                    : ' ';
+                  core.info(
+                    `  [${mark}] #${r.id} name="${r.name}" sha=${r.head_sha} status=${r.status}`
+                  );
                 }
                 forkRun = data.workflow_runs.find(
                   r => r.name === CHECK_NAME && r.head_sha === headSha
@@ -163,13 +170,15 @@ jobs:
                     `No **Fork CI** run was found in \`${forkOwner}/${forkRepo}\``,
                     `for commit \`${headSha.slice(0, 7)}\`.`,
                     '',
-                    '**Why:** GitHub Actions may be disabled in your fork, or the',
-                    'branch may be out of date with upstream.',
+                    '**Most likely cause:** your fork does not have the `fork-ci.yml`',
+                    'workflow file because the fork was created before it was added to',
+                    '`apache/texera`. Syncing your fork pulls in the missing file.',
                     '',
                     '**How to fix:**',
-                    `1. Open your fork's Actions tab: ${enableUrl}`,
-                    '2. Click **"I understand my workflows, go ahead and enable them"** if prompted.',
-                    '3. Sync your branch with upstream and push:',
+                    `1. Sync your fork with upstream on GitHub — click **"Sync fork"** on`,
+                    `   [your fork's main page](https://github.com/${forkOwner}/${forkRepo}).`,
+                    `2. Open your fork's Actions tab and enable workflows if prompted: ${enableUrl}`,
+                    '3. Rebase your branch on the updated main and push:',
                     '   ```bash',
                     '   git fetch upstream',
                     '   git rebase upstream/main',
