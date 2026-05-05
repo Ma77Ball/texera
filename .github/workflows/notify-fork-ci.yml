@@ -82,15 +82,27 @@ jobs:
               }
 
               try {
-                const { data } = await github.rest.actions.listWorkflowRuns({
-                  owner:       forkOwner,
-                  repo:        forkRepo,
-                  workflow_id: 'fork-ci.yml',
-                  branch:      forkBranch,
-                  per_page:    10,
+                // Use listWorkflowRunsForRepo (GET /repos/{owner}/{repo}/actions/runs)
+                // instead of listWorkflowRuns with workflow_id. The latter requires
+                // GitHub to resolve the filename to a workflow ID, which is unreliable
+                // in forks and returns nothing even when runs exist. The repo-wide
+                // endpoint needs no such lookup — we filter by name ourselves.
+                const { data } = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner:    forkOwner,
+                  repo:     forkRepo,
+                  branch:   forkBranch,
+                  per_page: 30,
                 });
+                // Log what we see so a SHA mismatch is immediately visible in logs.
+                core.info(
+                  `Attempt ${i + 1}: API returned ${data.workflow_runs.length} run(s). ` +
+                  `Looking for SHA ${headSha}.`
+                );
+                for (const r of data.workflow_runs.slice(0, 5)) {
+                  core.info(`  run #${r.id} name="${r.name}" sha=${r.head_sha} status=${r.status}`);
+                }
                 forkRun = data.workflow_runs.find(
-                  r => r.head_sha === headSha
+                  r => r.name === CHECK_NAME && r.head_sha === headSha
                 ) ?? null;
               } catch (err) {
                 core.info(`Attempt ${i + 1}: API error — ${err.message}`);
@@ -104,8 +116,8 @@ jobs:
                 break;
               }
               core.info(
-                `Attempt ${i + 1}/${MAX_ATTEMPTS}: no run for ` +
-                `SHA ${headSha.slice(0, 7)} yet.`
+                `Attempt ${i + 1}/${MAX_ATTEMPTS}: no matching run for ` +
+                `SHA ${headSha} yet.`
               );
             }
 
