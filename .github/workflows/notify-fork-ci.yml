@@ -30,6 +30,10 @@
 #
 # Security: pull_request_target runs with the base repo's token. No fork
 # code is checked out or executed — only GitHub REST API calls are made.
+#
+# Token: if the FORK_READ_PAT secret is set (actions: read on contributor
+# forks), it is used for the Actions API call so private forks are visible.
+# Falls back to github.token, which works for public forks without any setup.
 
 name: Notify Fork CI
 
@@ -44,13 +48,20 @@ permissions:
 jobs:
   notify:
     name: Notify fork CI
-    # Only meaningful for PRs from a fork.
-    if: github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
+      - name: Log PR source
+        run: |
+          if [[ "${{ github.event.pull_request.head.repo.full_name }}" == "${{ github.repository }}" ]]; then
+            echo "Same-repo PR — skipping Fork CI notification (no fork to query)."
+          else
+            echo "Fork PR from ${{ github.event.pull_request.head.repo.full_name }} — will locate fork run."
+          fi
       - name: Locate fork run and create PR check
+        if: github.event.pull_request.head.repo.full_name != github.repository
         uses: actions/github-script@v8
         with:
+          github-token: ${{ secrets.FORK_READ_PAT || github.token }}
           script: |
             const { owner, repo } = context.repo;
             const pr          = context.payload.pull_request;
@@ -168,17 +179,22 @@ jobs:
                   title:   'Fork CI not found — action required',
                   summary: [
                     `No **Fork CI** run was found in \`${forkOwner}/${forkRepo}\``,
-                    `for commit \`${headSha.slice(0, 7)}\`.`,
+                    `for commit \`${headSha.slice(0, 7)}\`. Possible causes (most likely first):`,
                     '',
-                    '**Most likely cause:** your fork does not have the `fork-ci.yml`',
-                    'workflow file because the fork was created before it was added to',
-                    '`apache/texera`. Syncing your fork pulls in the missing file.',
+                    `1. **Fork Actions are disabled.** First-time contributors must enable`,
+                    `   Actions on their fork: ${enableUrl}`,
+                    '2. **Fork is missing `fork-ci.yml`.** Your fork was created before the',
+                    '   file was added to `apache/texera`. Syncing your fork pulls it in.',
+                    '3. **Branch name matches an ignored pattern.** Branches named `main`,',
+                    '   `release/**`, or `ci-enable/**` are excluded from Fork CI.',
+                    '4. **Fork is private and upstream has no PAT.** Contact a maintainer',
+                    '   to configure a `FORK_READ_PAT` secret, or make your fork public.',
                     '',
                     '**How to fix:**',
-                    `1. Sync your fork with upstream on GitHub — click **"Sync fork"** on`,
+                    `1. Sync your fork — click **"Sync fork"** on`,
                     `   [your fork's main page](https://github.com/${forkOwner}/${forkRepo}).`,
-                    `2. Open your fork's Actions tab and enable workflows if prompted: ${enableUrl}`,
-                    '3. Rebase your branch on the updated main and push:',
+                    `2. Enable workflows if prompted: ${enableUrl}`,
+                    '3. Rebase your branch and push:',
                     '   ```bash',
                     '   git fetch upstream',
                     '   git rebase upstream/main',

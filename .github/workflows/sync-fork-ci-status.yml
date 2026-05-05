@@ -25,6 +25,10 @@
 #
 # Also fires immediately after notify-fork-ci.yml completes so fast
 # fork runs are reflected on the PR without waiting a full 15 minutes.
+#
+# Token: if the FORK_READ_PAT secret is set (actions: read on contributor
+# forks), it is used for the Actions API call so private forks are visible.
+# Falls back to github.token, which works for public forks without any setup.
 
 name: Sync Fork CI Status
 
@@ -52,6 +56,7 @@ jobs:
       - name: Sync fork run status to PR checks
         uses: actions/github-script@v8
         with:
+          github-token: ${{ secrets.FORK_READ_PAT || github.token }}
           script: |
             const { owner, repo } = context.repo;
             const CHECK_NAME = 'Fork CI';
@@ -88,7 +93,7 @@ jobs:
                   // Skip checks that are already resolved or are the
                   // action_required/failure "no run found" placeholder.
                   if (cr.conclusion === 'action_required' ||
-                      cr.conclusion === 'failure' && !cr.output?.text) {
+                      (cr.conclusion === 'failure' && !cr.output?.text)) {
                     core.info(`  Skip check ${cr.id}: terminal placeholder.`);
                     continue;
                   }
