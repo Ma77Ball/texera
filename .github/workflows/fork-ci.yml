@@ -15,34 +15,20 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Fork CI — Apache Spark model
+# Fork CI — Apache Spark model (step 1 of 3)
 #
-# Runs the full build matrix automatically when a contributor pushes to any
-# branch in their forked repository. Results are visible in the fork and on
-# the eventual pull request, letting committers verify CI passed before
-# merging.
+# Runs the full build matrix in the contributor's fork on every branch push.
+# notify-fork-ci.yml detects this run when a PR is opened and creates a
+# "Fork CI" check on the PR. sync-fork-ci-status.yml polls this run every
+# 15 minutes and keeps the check current until the run completes.
 #
-# This workflow is a deliberate no-op in the canonical apache/texera
-# repository. Push-based CI there is gated to ci-enable/** and main via
-# required-checks.yml; enabling it for every branch in the main repo would
-# burn shared runner quota on work-in-progress pushes.
+# This workflow is a no-op in the canonical apache/texera repository —
+# the job guard (github.repository_owner != 'apache') ensures it never
+# consumes main-repo runner quota.
 #
-# All build stacks run unconditionally — there are no PR labels in a fork
-# push context, so label-based stack filtering is skipped. Contributors get
-# full coverage on every push.
-#
-# Secrets such as CODECOV_TOKEN and NX_CLOUD_ACCESS_TOKEN are unavailable in
-# forks. Both are handled gracefully: Codecov uploads are skipped (the action
-# has fail_ci_if_error: false) and NX Cloud remote caching is disabled (the
-# build still succeeds, just without cache acceleration).
-#
-# How to use:
-#   1. Fork apache/texera on GitHub (Settings → Actions → "Allow all actions"
-#      must be on — it is by default for new forks).
-#   2. Push your feature branch to your fork.
-#   3. This workflow fires automatically. Check the Actions tab in your fork.
-#   4. Open a PR to apache/texera once the fork CI is green. Committers will
-#      see the fork CI status linked from your PR.
+# Secrets (CODECOV_TOKEN, NX_CLOUD_ACCESS_TOKEN) are unavailable in forks
+# and degrade gracefully: Codecov uploads are skipped (fail_ci_if_error:
+# false) and NX Cloud remote caching is disabled; builds still pass.
 
 name: Fork CI
 
@@ -62,8 +48,6 @@ concurrency:
 
 jobs:
   build:
-    # Guard: only run in forks. The canonical apache/texera repo handles
-    # push-based CI through required-checks.yml (ci-enable/** and main).
     if: github.repository_owner != 'apache'
     uses: ./.github/workflows/build.yml
     with:
