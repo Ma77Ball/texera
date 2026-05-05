@@ -1,0 +1,214 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Sync Fork CI Status — Apache Spark model (step 3 of 3)
+#
+# Runs on a 5-minute cron schedule in the canonical apache/texera repository.
+# For every open fork PR it finds the "Fork CI" check_run created by
+# notify-fork-ci.yml, queries the contributor's fork for the current run
+# status, and updates the check_run so committers always see an up-to-date
+# result without refreshing.
+#
+# State machine:
+#   queued / in_progress  →  keep polling; update status only
+#   completed             →  mirror conclusion (success / failure / cancelled …)
+#                             and stop polling for that PR
+#
+# The fork run coordinates (fork_owner, fork_repo, fork_run_id) are embedded
+# as JSON in the check_run's output.text by notify-fork-ci.yml and parsed back
+# out here. No external state store is needed.
+#
+# The GITHUB_TOKEN is sufficient for all API calls:
+#   - checks:write    to update the check_run in the main repo
+#   - pull-requests:read  to list open PRs
+#   - The fork's Actions API is public (no fork token needed for public forks)
+
+name: Sync Fork CI Status
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  # Also trigger when Required Checks finishes — if the head PR just merged,
+  # kick the sync so leftover fork PRs are marked promptly.
+  workflow_run:
+    workflows: ['Required Checks']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  checks: write
+  pull-requests: read
+
+concurrency:
+  group: sync-fork-ci-status
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync fork CI status to PR checks
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const CHECK_NAME = 'Fork CI';
+
+            // Collect all open PRs from forks targeting main. Paginate in
+            // case there are many open PRs.
+            const allPRs = await github.paginate(github.rest.pulls.list, {
+              owner, repo,
+              state:    'open',
+              base:     'main',
+              per_page: 100,
+            });
+
+            const forkPRs = allPRs.filter(
+              pr =>
+                pr.head.repo &&
+                pr.head.repo.full_name !== `${owner}/${repo}`
+            );
+
+            core.info(
+              `${allPRs.length} open PR(s) total; ` +
+              `${forkPRs.length} from forks.`
+            );
+
+            for (const pr of forkPRs) {
+              const headSha = pr.head.sha;
+
+              // Find the most recent Fork CI check for this PR's head SHA.
+              let checkRuns;
+              try {
+                const { data } = await github.rest.checks.listForRef({
+                  owner, repo,
+                  ref:        headSha,
+                  check_name: CHECK_NAME,
+                  per_page:   10,
+                });
+                checkRuns = data.check_runs;
+              } catch (err) {
+                core.warning(
+                  `PR #${pr.number}: failed to list checks for ${headSha}: ` +
+                  err.message
+                );
+                continue;
+              }
+
+              if (checkRuns.length === 0) {
+                core.info(`PR #${pr.number}: no ${CHECK_NAME} check found; skipping.`);
+                continue;
+              }
+
+              // Most recently created check is last in the array when sorted
+              // by id ascending (GitHub default). Take the highest id.
+              const check = checkRuns.reduce(
+                (a, b) => (b.id > a.id ? b : a)
+              );
+
+              // Nothing to update — already resolved.
+              if (check.status === 'completed') {
+                core.info(
+                  `PR #${pr.number}: check already completed ` +
+                  `(conclusion=${check.conclusion}); skipping.`
+                );
+                continue;
+              }
+
+              // Parse the fork coordinates stored by notify-fork-ci.yml.
+              let forkInfo;
+              try {
+                forkInfo = JSON.parse(check.output?.text ?? '{}');
+              } catch (err) {
+                core.warning(
+                  `PR #${pr.number}: could not parse fork info from ` +
+                  `check output.text: ${err.message}`
+                );
+                continue;
+              }
+
+              const { fork_owner, fork_repo, fork_run_id } = forkInfo;
+
+              if (!fork_run_id) {
+                // action_required check — contributor hasn't enabled Actions yet.
+                core.info(
+                  `PR #${pr.number}: no fork_run_id stored ` +
+                  `(action_required state); skipping.`
+                );
+                continue;
+              }
+
+              // Fetch current status from the contributor's fork.
+              let forkRun;
+              try {
+                const { data } = await github.rest.actions.getWorkflowRun({
+                  owner:  fork_owner,
+                  repo:   fork_repo,
+                  run_id: fork_run_id,
+                });
+                forkRun = data;
+              } catch (err) {
+                core.warning(
+                  `PR #${pr.number}: could not fetch run ${fork_run_id} ` +
+                  `from ${fork_owner}/${fork_repo}: ${err.message}`
+                );
+                continue;
+              }
+
+              // Build the update payload. Mirror only what's needed so we
+              // don't accidentally wipe fields GitHub owns (e.g. started_at).
+              const patch = {
+                owner, repo,
+                check_run_id: check.id,
+                details_url:  forkRun.html_url,
+                // Preserve the fork coordinates for the next sync cycle.
+                output: {
+                  title:   check.output.title,
+                  summary: check.output.summary,
+                  text:    check.output.text,
+                },
+              };
+
+              if (forkRun.status === 'completed') {
+                patch.status       = 'completed';
+                patch.conclusion   = forkRun.conclusion;
+                patch.completed_at = forkRun.updated_at;
+
+                // Rewrite summary to show the final result clearly.
+                const icon = forkRun.conclusion === 'success' ? '✅' : '❌';
+                patch.output.title = `Fork CI ${forkRun.conclusion}`;
+                patch.output.summary =
+                  `${icon} Fork CI finished with **${forkRun.conclusion}** in ` +
+                  `[${fork_owner}/${fork_repo}](${forkRun.html_url}).`;
+              } else {
+                patch.status = forkRun.status; // queued or in_progress
+              }
+
+              try {
+                await github.rest.checks.update(patch);
+                core.info(
+                  `PR #${pr.number}: updated ${CHECK_NAME} → ` +
+                  `status=${forkRun.status}` +
+                  (forkRun.conclusion ? ` conclusion=${forkRun.conclusion}` : '')
+                );
+              } catch (err) {
+                core.warning(
+                  `PR #${pr.number}: failed to update check ${check.id}: ` +
+                  err.message
+                );
+              }
+            }
