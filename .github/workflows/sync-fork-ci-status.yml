@@ -17,37 +17,23 @@
 
 # Sync Fork CI Status — Apache Spark model (step 3 of 3)
 #
-# Keeps the "Fork CI" check_run on each open fork PR up to date by querying
-# the contributor's fork for the current workflow run status.
+# Mirrors apache/spark's update_build_status.yml exactly.
+# Runs every 15 minutes. For each open PR it finds the "Fork CI"
+# check_run created by notify-fork-ci.yml, reads the fork run
+# coordinates from output.text, queries the fork's Actions API,
+# and patches the check_run with the current status/conclusion.
 #
-# Triggers:
-#   - workflow_run on "Notify Fork CI" completed: fires immediately after the
-#     check_run is created, catching fork runs that finish quickly.
-#   - workflow_run on "Required Checks" completed: catches the case where a
-#     PR just merged and remaining fork PRs need a final status sweep.
-#   - cron every 5 min: safety net for any events missed above.
-#   - workflow_dispatch: manual trigger for testing.
-#
-# State machine:
-#   queued / in_progress  →  keep polling; update status only
-#   completed             →  mirror conclusion (success / failure / cancelled …)
-#                             and stop polling for that PR
-#
-# The fork run coordinates (fork_owner, fork_repo, fork_run_id) are embedded
-# as JSON in the check_run's output.text by notify-fork-ci.yml and parsed back
-# out here. No external state store is needed.
+# Also fires immediately after notify-fork-ci.yml completes so fast
+# fork runs are reflected on the PR without waiting a full 15 minutes.
 
 name: Sync Fork CI Status
 
 on:
-  # Fire immediately when notify-fork-ci.yml finishes creating the check.
-  # This catches fork runs that are already done or complete quickly, so the
-  # PR check updates in seconds rather than waiting for the next cron tick.
-  workflow_run:
-    workflows: ['Notify Fork CI', 'Required Checks']
-    types: [completed]
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/15 * * * *'
+  workflow_run:
+    workflows: ['Notify Fork CI']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -59,157 +45,113 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sync:
+  update:
+    name: Update fork CI status
     runs-on: ubuntu-latest
     steps:
-      - name: Sync fork CI status to PR checks
+      - name: Sync fork run status to PR checks
         uses: actions/github-script@v8
         with:
           script: |
             const { owner, repo } = context.repo;
             const CHECK_NAME = 'Fork CI';
 
-            // Collect all open PRs from forks targeting main. Paginate in
-            // case there are many open PRs.
-            const allPRs = await github.paginate(github.rest.pulls.list, {
-              owner, repo,
-              state:    'open',
-              base:     'main',
-              per_page: 100,
-            });
+            // Mirrors Spark's maybeReady list — only poll PRs that could
+            // still meaningfully change state (exclude conflicting/blocked).
+            const maybeReady = [
+              'behind', 'clean', 'draft', 'has_hooks', 'unknown', 'unstable'
+            ];
 
-            const forkPRs = allPRs.filter(
-              pr =>
-                pr.head.repo &&
-                pr.head.repo.full_name !== `${owner}/${repo}`
-            );
+            for await (const page of github.paginate.iterator(
+              github.rest.pulls.list,
+              { owner, repo, state: 'open', per_page: 100 }
+            )) {
+              for (const pr of page.data) {
+                core.info(`PR #${pr.number} — mergeable_state: ${pr.mergeable_state}`);
 
-            core.info(
-              `${allPRs.length} open PR(s) total; ` +
-              `${forkPRs.length} from forks.`
-            );
+                if (pr.mergeable_state != null &&
+                    !maybeReady.includes(pr.mergeable_state)) {
+                  core.info(`  Skip: mergeable_state=${pr.mergeable_state}`);
+                  continue;
+                }
 
-            for (const pr of forkPRs) {
-              const headSha = pr.head.sha;
+                // Find the Fork CI check for this PR's head SHA.
+                const { data: { check_runs } } =
+                  await github.rest.checks.listForRef({
+                    owner, repo,
+                    ref:        pr.head.sha,
+                    check_name: CHECK_NAME,
+                    per_page:   100,
+                  });
 
-              // Find the most recent Fork CI check for this PR's head SHA.
-              let checkRuns;
-              try {
-                const { data } = await github.rest.checks.listForRef({
-                  owner, repo,
-                  ref:        headSha,
-                  check_name: CHECK_NAME,
-                  per_page:   10,
-                });
-                checkRuns = data.check_runs;
-              } catch (err) {
-                core.warning(
-                  `PR #${pr.number}: failed to list checks for ${headSha}: ` +
-                  err.message
-                );
-                continue;
-              }
+                for (const cr of check_runs) {
+                  // Skip checks that are already resolved or are the
+                  // action_required/failure "no run found" placeholder.
+                  if (cr.conclusion === 'action_required' ||
+                      cr.conclusion === 'failure' && !cr.output?.text) {
+                    core.info(`  Skip check ${cr.id}: terminal placeholder.`);
+                    continue;
+                  }
+                  if (cr.status === 'completed') {
+                    core.info(`  Skip check ${cr.id}: already completed (${cr.conclusion}).`);
+                    break;
+                  }
 
-              if (checkRuns.length === 0) {
-                core.info(`PR #${pr.number}: no ${CHECK_NAME} check found; skipping.`);
-                continue;
-              }
+                  // Read fork run coordinates stored by notify-fork-ci.yml.
+                  let params;
+                  try {
+                    params = JSON.parse(cr.output?.text ?? '{}');
+                  } catch (err) {
+                    core.warning(`  Check ${cr.id}: could not parse output.text — ${err.message}`);
+                    break;
+                  }
 
-              // Most recently created check is last in the array when sorted
-              // by id ascending (GitHub default). Take the highest id.
-              const check = checkRuns.reduce(
-                (a, b) => (b.id > a.id ? b : a)
-              );
+                  if (!params.run_id) {
+                    core.info(`  Check ${cr.id}: no run_id in output.text, skipping.`);
+                    break;
+                  }
 
-              // Nothing to update — already resolved.
-              if (check.status === 'completed') {
-                core.info(
-                  `PR #${pr.number}: check already completed ` +
-                  `(conclusion=${check.conclusion}); skipping.`
-                );
-                continue;
-              }
+                  // Query the fork's workflow run.
+                  let run;
+                  try {
+                    const { data } = await github.rest.actions.getWorkflowRun({
+                      owner:  params.owner,
+                      repo:   params.repo,
+                      run_id: params.run_id,
+                    });
+                    run = data;
+                  } catch (err) {
+                    core.warning(
+                      `  Check ${cr.id}: could not fetch run ${params.run_id} ` +
+                      `from ${params.owner}/${params.repo} — ${err.message}`
+                    );
+                    break;
+                  }
 
-              // Parse the fork coordinates stored by notify-fork-ci.yml.
-              let forkInfo;
-              try {
-                forkInfo = JSON.parse(check.output?.text ?? '{}');
-              } catch (err) {
-                core.warning(
-                  `PR #${pr.number}: could not parse fork info from ` +
-                  `check output.text: ${err.message}`
-                );
-                continue;
-              }
-
-              const { fork_owner, fork_repo, fork_run_id } = forkInfo;
-
-              if (!fork_run_id) {
-                // action_required check — contributor hasn't enabled Actions yet.
-                core.info(
-                  `PR #${pr.number}: no fork_run_id stored ` +
-                  `(action_required state); skipping.`
-                );
-                continue;
-              }
-
-              // Fetch current status from the contributor's fork.
-              let forkRun;
-              try {
-                const { data } = await github.rest.actions.getWorkflowRun({
-                  owner:  fork_owner,
-                  repo:   fork_repo,
-                  run_id: fork_run_id,
-                });
-                forkRun = data;
-              } catch (err) {
-                core.warning(
-                  `PR #${pr.number}: could not fetch run ${fork_run_id} ` +
-                  `from ${fork_owner}/${fork_repo}: ${err.message}`
-                );
-                continue;
-              }
-
-              // Build the update payload. Mirror only what's needed so we
-              // don't accidentally wipe fields GitHub owns (e.g. started_at).
-              const patch = {
-                owner, repo,
-                check_run_id: check.id,
-                details_url:  forkRun.html_url,
-                // Preserve the fork coordinates for the next sync cycle.
-                output: {
-                  title:   check.output.title,
-                  summary: check.output.summary,
-                  text:    check.output.text,
-                },
-              };
-
-              if (forkRun.status === 'completed') {
-                patch.status       = 'completed';
-                patch.conclusion   = forkRun.conclusion;
-                patch.completed_at = forkRun.updated_at;
-
-                // Rewrite summary to show the final result clearly.
-                const icon = forkRun.conclusion === 'success' ? '✅' : '❌';
-                patch.output.title = `Fork CI ${forkRun.conclusion}`;
-                patch.output.summary =
-                  `${icon} Fork CI finished with **${forkRun.conclusion}** in ` +
-                  `[${fork_owner}/${fork_repo}](${forkRun.html_url}).`;
-              } else {
-                patch.status = forkRun.status; // queued or in_progress
-              }
-
-              try {
-                await github.rest.checks.update(patch);
-                core.info(
-                  `PR #${pr.number}: updated ${CHECK_NAME} → ` +
-                  `status=${forkRun.status}` +
-                  (forkRun.conclusion ? ` conclusion=${forkRun.conclusion}` : '')
-                );
-              } catch (err) {
-                core.warning(
-                  `PR #${pr.number}: failed to update check ${check.id}: ` +
-                  err.message
-                );
+                  // Patch the check_run to mirror the fork run's current state.
+                  if (run.status === 'completed') {
+                    core.info(
+                      `  Check ${cr.id}: set status=${run.status} conclusion=${run.conclusion}`
+                    );
+                    await github.rest.checks.update({
+                      owner, repo,
+                      check_run_id: cr.id,
+                      status:       'completed',
+                      conclusion:   run.conclusion,
+                      details_url:  run.html_url,
+                      output:       cr.output,
+                    });
+                  } else {
+                    core.info(`  Check ${cr.id}: set status=${run.status}`);
+                    await github.rest.checks.update({
+                      owner, repo,
+                      check_run_id: cr.id,
+                      status:       run.status,
+                      details_url:  run.html_url,
+                      output:       cr.output,
+                    });
+                  }
+                  break;
+                }
               }
             }

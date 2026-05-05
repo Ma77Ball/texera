@@ -17,22 +17,19 @@
 
 # Notify Fork CI — Apache Spark model (step 2 of 3)
 #
-# Fires in the canonical apache/texera repo whenever a PR from a fork is
-# opened, reopened, or updated. It locates the corresponding "Fork CI"
-# workflow run in the contributor's fork (triggered by fork-ci.yml on push)
-# and creates a check_run on the PR's head SHA that committers can inspect.
+# Mirrors apache/spark's notify_test_workflow.yml with one improvement:
+# Spark takes the most-recent run on the branch and throws if the SHA
+# doesn't match, leaving the PR with no check. We instead retry up to
+# ~60s so a run that hasn't registered yet is still found, and only
+# create the failure check after exhausting retries.
 #
-# If the fork has GitHub Actions disabled or the push has not yet started a
-# run, the check is set to action_required with instructions so the PR is
-# visibly blocked until the contributor enables Actions and re-pushes.
+# On success this workflow creates a "Fork CI" check_run on the PR in
+# apache/texera whose output.text stores the fork run coordinates as
+# JSON. sync-fork-ci-status.yml reads those coordinates every 15 minutes
+# to keep the check current.
 #
-# The output.text field of the check_run stores JSON with the fork coordinates
-# (fork_owner, fork_repo, fork_run_id). sync-fork-ci-status.yml reads this
-# every few minutes to keep the check status current as the fork run progresses.
-#
-# Security: pull_request_target runs with the base repo's token and write
-# permissions. No code from the fork is checked out or executed here; only
-# GitHub REST API calls are made.
+# Security: pull_request_target runs with the base repo's token. No fork
+# code is checked out or executed — only GitHub REST API calls are made.
 
 name: Notify Fork CI
 
@@ -45,97 +42,103 @@ permissions:
   pull-requests: read
 
 jobs:
-  create-check:
-    # Only meaningful for PRs that originate from a fork.
+  notify:
+    name: Notify fork CI
+    # Only meaningful for PRs from a fork.
     if: github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     steps:
-      - name: Locate fork CI run and create PR check
+      - name: Locate fork run and create PR check
         uses: actions/github-script@v8
         with:
           script: |
             const { owner, repo } = context.repo;
-            const pr        = context.payload.pull_request;
-            const headSha   = pr.head.sha;
-            const forkOwner = pr.head.repo.owner.login;
-            const forkRepo  = pr.head.repo.name;
-            const forkBranch = pr.head.ref;
-            const CHECK_NAME = 'Fork CI';
+            const pr          = context.payload.pull_request;
+            const headSha     = pr.head.sha;
+            const forkOwner   = pr.head.repo.owner.login;
+            const forkRepo    = pr.head.repo.name;
+            const forkBranch  = pr.head.ref;
+            const CHECK_NAME  = 'Fork CI';
 
-            // Poll the fork for the matching workflow run. GitHub can take
-            // up to ~90s to register a run after a push, so we retry with
-            // backoff rather than doing a single fixed wait.
-            // Budget: 15s + 20s + 25s + 30s + 30s = ~2 min total.
-            const DELAYS_MS = [15000, 20000, 25000, 30000, 30000];
+            // Give the fork time to register the run before the first check.
+            // GitHub typically takes 30-90s to start a workflow after a push.
+            core.info('Waiting 60s for fork to register the workflow run…');
+            await new Promise(r => setTimeout(r, 60000));
+
+            // Search by branch name (fast — avoids full-repo SHA scan) then
+            // validate the SHA against the PR head. Unlike Spark (which takes
+            // runs[0] blindly and throws on mismatch), we filter for the exact
+            // SHA so a stale run from a previous push is never linked.
+            // Finds any status: queued, in_progress, or completed.
+            // 3 attempts with 30s between each.
+            const MAX_ATTEMPTS = 3;
+            const RETRY_DELAY_MS = 30000;
             let forkRun = null;
 
-            for (let attempt = 0; attempt < DELAYS_MS.length; attempt++) {
-              core.info(
-                `Waiting ${DELAYS_MS[attempt] / 1000}s before attempt ` +
-                `${attempt + 1}/${DELAYS_MS.length}…`
-              );
-              await new Promise(r => setTimeout(r, DELAYS_MS[attempt]));
+            for (let i = 0; i < MAX_ATTEMPTS; i++) {
+              if (i > 0) {
+                core.info(`Waiting 30s before attempt ${i + 1}/${MAX_ATTEMPTS}…`);
+                await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+              }
 
               try {
-                const { data } = await github.rest.actions.listWorkflowRunsForRepo({
-                  owner:    forkOwner,
-                  repo:     forkRepo,
-                  event:    'push',
-                  per_page: 20,
+                const { data } = await github.rest.actions.listWorkflowRuns({
+                  owner:       forkOwner,
+                  repo:        forkRepo,
+                  workflow_id: 'fork-ci.yml',
+                  branch:      forkBranch,
+                  per_page:    10,
                 });
                 forkRun = data.workflow_runs.find(
-                  r => r.head_sha === headSha && r.name === CHECK_NAME
+                  r => r.head_sha === headSha
                 ) ?? null;
               } catch (err) {
-                core.info(
-                  `Attempt ${attempt + 1}: could not list runs in ` +
-                  `${forkOwner}/${forkRepo}: ${err.message}`
-                );
+                core.info(`Attempt ${i + 1}: API error — ${err.message}`);
               }
 
               if (forkRun) {
                 core.info(
-                  `Found fork run #${forkRun.id} on attempt ${attempt + 1}.`
+                  `Found run #${forkRun.id} (status=${forkRun.status}) ` +
+                  `on attempt ${i + 1}.`
                 );
                 break;
               }
               core.info(
-                `Attempt ${attempt + 1}: no matching run for SHA ` +
-                `${headSha.slice(0, 7)} yet.`
+                `Attempt ${i + 1}/${MAX_ATTEMPTS}: no run for ` +
+                `SHA ${headSha.slice(0, 7)} yet.`
               );
             }
 
             if (forkRun) {
-              core.info(
-                `Found fork run #${forkRun.id} ` +
-                `(status=${forkRun.status}) in ${forkOwner}/${forkRepo}.`
-              );
+              const actionsUrl =
+                `https://github.com/${forkOwner}/${forkRepo}/actions/runs/${forkRun.id}`;
+
               await github.rest.checks.create({
                 owner, repo,
                 name:        CHECK_NAME,
                 head_sha:    headSha,
-                status:      'in_progress',
-                details_url: forkRun.html_url,
+                status:      'queued',
+                details_url: actionsUrl,
                 output: {
-                  title:   'Fork CI in progress',
-                  summary: `CI is running in the contributor's fork: ` +
-                           `[${forkOwner}/${forkRepo}](${forkRun.html_url}).\n\n` +
-                           `This check updates every few minutes as the fork run progresses.`,
-                  // sync-fork-ci-status.yml parses this JSON to locate the run.
+                  title:   'Fork CI running',
+                  summary: `[See CI results](${actionsUrl}) in \`${forkOwner}/${forkRepo}\`.\n\n` +
+                           `This check updates every 15 minutes as the run progresses.`,
+                  // sync-fork-ci-status.yml parses this JSON to poll the run.
                   text: JSON.stringify({
-                    fork_owner:  forkOwner,
-                    fork_repo:   forkRepo,
-                    fork_run_id: forkRun.id,
+                    owner:  forkOwner,
+                    repo:   forkRepo,
+                    run_id: forkRun.id,
                   }),
                 },
               });
+              core.info(`Created Fork CI check → run #${forkRun.id}`);
             } else {
-              core.info(
-                `No Fork CI run found for SHA ${headSha} in ` +
-                `${forkOwner}/${forkRepo}. Creating action_required check.`
-              );
+              // No matching run found after all retries — fork Actions likely
+              // disabled. Mirror Spark's action_required but use failure so
+              // it is a visible red X on the PR.
               const enableUrl =
                 `https://github.com/${forkOwner}/${forkRepo}/actions`;
+
               await github.rest.checks.create({
                 owner, repo,
                 name:        CHECK_NAME,
@@ -145,26 +148,23 @@ jobs:
                 output: {
                   title:   'Fork CI not found — action required',
                   summary: [
-                    `No **Fork CI** run was detected in \`${forkOwner}/${forkRepo}\``,
+                    `No **Fork CI** run was found in \`${forkOwner}/${forkRepo}\``,
                     `for commit \`${headSha.slice(0, 7)}\`.`,
                     '',
                     '**Why:** GitHub Actions may be disabled in your fork, or the',
-                    'push event did not trigger the workflow.',
+                    'branch may be out of date with upstream.',
                     '',
                     '**How to fix:**',
                     `1. Open your fork's Actions tab: ${enableUrl}`,
-                    '2. If prompted, click **"I understand my workflows, go ahead and enable them"**.',
-                    '3. Push a new commit to your branch (an empty commit works):',
-                    '   ```',
-                    '   git commit --allow-empty -m "ci: trigger fork CI"',
-                    '   git push',
+                    '2. Click **"I understand my workflows, go ahead and enable them"** if prompted.',
+                    '3. Sync your branch with upstream and push:',
+                    '   ```bash',
+                    '   git fetch upstream',
+                    '   git rebase upstream/main',
+                    '   git push origin YOUR_BRANCH --force',
                     '   ```',
                   ].join('\n'),
-                  text: JSON.stringify({
-                    fork_owner:  forkOwner,
-                    fork_repo:   forkRepo,
-                    fork_run_id: null,
-                  }),
                 },
               });
+              core.info('No fork run found — created failure check with instructions.');
             }
