@@ -308,29 +308,52 @@ jobs:
             }
 
             // ----- scenario 5: detection success -------------------------------
+            // The Spark-proven pattern: when a matching run exists, ALWAYS
+            // create the initial check with status='queued', regardless of
+            // whether the fork run is queued / in_progress / completed.
+            // Reasoning:
+            //   - status='in_progress' on checks.create requires `started_at`
+            //     and renders inconsistently in the PR UI when omitted (the
+            //     check sometimes displays as "passed" instead of "in progress")
+            //   - status='completed' immediately would skip the polling/sync
+            //     loop entirely; safer to let update_build_status.yml advance
+            //     the status, which has the proper output/conclusion handling
+            //   - status='queued' is universally renderable and stable
+            // update_build_status.yml runs every 5 minutes and will move the
+            // check through in_progress -> completed as the fork run progresses.
             const actions_url = 'https://github.com/' + headRepo + '/actions/runs/' + matchingRun.id
-            console.log('SCENARIO: detection success — fork run status=' + matchingRun.status + ' conclusion=' + matchingRun.conclusion)
-            console.log('  -> Build: status=' + matchingRun.status + (matchingRun.status === 'completed' ? ' conclusion=' + matchingRun.conclusion : '') + ' (' + actions_url + ')')
+            const runRef = JSON.stringify({
+              owner: pr.head.repo.owner.login,
+              repo: pr.head.repo.name,
+              run_id: matchingRun.id,
+            })
 
-            const checkData = {
+            console.log('SCENARIO: detection success — fork run id=' + matchingRun.id + ' status=' + matchingRun.status + ' conclusion=' + matchingRun.conclusion)
+            console.log('  -> Build: status=queued (will be advanced by update_build_status.yml) -> ' + actions_url)
+
+            await github.rest.checks.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               name: name,
               head_sha: head_sha,
-              status: matchingRun.status,
-              output: {
-                title: 'Fork CI: ' + matchingRun.status + (matchingRun.status === 'completed' ? ' (' + matchingRun.conclusion + ')' : ''),
-                summary: '[See test results on `' + headRepo + '`](' + actions_url + ')',
-                text: JSON.stringify({
-                  owner: pr.head.repo.owner.login,
-                  repo: pr.head.repo.name,
-                  run_id: matchingRun.id
-                })
-              },
+              external_id: String(matchingRun.id),
               details_url: actions_url,
-            }
-            if (matchingRun.status === 'completed') {
-              checkData.conclusion = matchingRun.conclusion
-            }
-
-            await github.rest.checks.create(checkData)
+              status: 'queued',
+              output: {
+                title: 'Fork CI run #' + matchingRun.id + ' (queued)',
+                summary:
+                  ':link: **[View fork CI run on `' + headRepo + '`](' + actions_url + ')**\n' +
+                  '\n' +
+                  'This check mirrors the `fork-ci.yml` workflow run on `' + headRepo + ':' + head_ref + '` for commit `' + head_sha.substring(0, 8) + '`. ' +
+                  'It will advance to `in_progress` and then `completed` (success / failure) automatically as the fork run progresses, via the `update_build_status.yml` workflow that polls every 5 minutes.\n' +
+                  '\n' +
+                  '| Field | Value |\n' +
+                  '|---|---|\n' +
+                  '| Fork repo | `' + headRepo + '` |\n' +
+                  '| Branch | `' + head_ref + '` |\n' +
+                  '| Commit | `' + head_sha + '` |\n' +
+                  '| Run ID | [`' + matchingRun.id + '`](' + actions_url + ') |\n' +
+                  '| Current run status | `' + matchingRun.status + (matchingRun.conclusion ? ' (' + matchingRun.conclusion + ')' : '') + '` |\n',
+                text: runRef,
+              },
+            })
