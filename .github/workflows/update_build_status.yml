@@ -151,7 +151,10 @@ jobs:
                           details_url: actions_url,
                           output: buildOutput(wr, runRef),
                         }
-                        if (wr.run_started_at) patch.started_at = wr.run_started_at
+                        // started_at is required for in_progress to render as
+                        // a spinner instead of "passed"; fall back to now() if
+                        // the API response doesn't carry it.
+                        patch.started_at = wr.run_started_at || new Date().toISOString()
                         if (wr.status === 'completed') {
                           patch.conclusion = wr.conclusion
                           if (wr.updated_at) patch.completed_at = wr.updated_at
@@ -201,16 +204,24 @@ jobs:
                       break
                     }
 
+                    const mappedStatus = run.data.status === 'completed'
+                      ? 'completed'
+                      : (run.data.status === 'queued' ? 'queued' : 'in_progress')
                     const patch = {
                       owner: context.repo.owner,
                       repo: context.repo.repo,
                       check_run_id: cr.id,
                       external_id: String(run.data.id),
-                      status: run.data.status === 'completed' ? 'completed' : (run.data.status === 'queued' ? 'queued' : 'in_progress'),
+                      status: mappedStatus,
                       details_url: run.data.html_url,
                       output: buildOutput(run.data, runRef),
                     }
-                    if (run.data.run_started_at) patch.started_at = run.data.run_started_at
+                    // started_at is required for in_progress to render as a
+                    // spinner instead of "passed"; fall back to now() if the
+                    // API response doesn't carry it.
+                    if (mappedStatus === 'in_progress' || run.data.run_started_at) {
+                      patch.started_at = run.data.run_started_at || new Date().toISOString()
+                    }
                     if (run.data.status === 'completed') {
                       patch.conclusion = run.data.conclusion
                       if (run.data.updated_at) patch.completed_at = run.data.updated_at

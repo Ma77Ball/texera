@@ -48,16 +48,26 @@ jobs:
             const headRepo = pr.head.repo ? pr.head.repo.full_name : null
             const baseRepo = context.repo.owner + '/' + context.repo.repo
 
+            // URL of THIS notify workflow run — used as the universal fallback
+            // for the Build check's "Details" button. Every Build state (queued,
+            // in_progress on fork, completed-success, action_required, etc.)
+            // gets a clickable Details page pointing somewhere relevant. For
+            // failure scenarios where there's no fork run to link to, the
+            // notify run's logs are the next-best explanation.
+            const notifyRunUrl = context.serverUrl + '/' + context.repo.owner + '/' + context.repo.repo + '/actions/runs/' + context.runId
+
             console.log('=== Fork CI detection ===')
             console.log('PR #' + pr.number + ': ' + (headRepo || '<deleted>') + ':' + head_ref + ' -> ' + baseRepo + ':' + pr.base.ref)
             console.log('  head sha:  ' + head_sha)
             console.log('  event:     ' + context.payload.action)
+            console.log('  notify run: ' + notifyRunUrl)
 
             // ----- create the Build check up front -----------------------------
-            // The Build check is GUARANTEED to exist before any scenario runs.
-            // Every scenario PATCHes this same check to its terminal state.
-            // Without this, any unexpected failure in a scenario branch would
-            // leave the PR with no Build check at all.
+            // Build is REQUIRED in branch protection; we guarantee it exists
+            // before any scenario runs, with a details_url so the "Details"
+            // button on the PR's checks tab is clickable from the moment
+            // notify starts. Every scenario PATCHes this same check to its
+            // terminal state — never recreated, never missing.
             let buildCheckId = null
             try {
               const created = await github.rest.checks.create({
@@ -66,13 +76,19 @@ jobs:
                 name: name,
                 head_sha: head_sha,
                 status: 'queued',
+                details_url: notifyRunUrl,
                 output: {
                   title: 'Fork CI: detecting…',
                   summary:
-                    'Initializing the Build check. This will be updated in a few seconds with one of:\n' +
+                    ':link: **[View this notify run](' + notifyRunUrl + ')**\n' +
                     '\n' +
-                    '- Link to the fork CI workflow run (success path)\n' +
-                    '- Failure with troubleshooting steps (Actions disabled, run not found, blocked branch, etc.)\n',
+                    'Initializing the required `Build` check for PR #' + pr.number + '. This will be updated in a few seconds with one of:\n' +
+                    '\n' +
+                    '- :white_check_mark: **success** — fork CI run found, linked to it\n' +
+                    '- :hourglass_flowing_sand: **in_progress** — fork CI run found and currently running\n' +
+                    '- :x: **action_required** — fork run not found / blocked branch / fork repo inaccessible (the page will explain)\n' +
+                    '\n' +
+                    'This is a [required check](' + context.serverUrl + '/' + baseRepo + '/settings/branch_protection_rules) — the PR cannot merge until it reports `success`.\n',
                 },
               })
               buildCheckId = created.data.id
@@ -144,24 +160,26 @@ jobs:
               }
             }
 
-            // Failure scenarios fail the workflow itself (red ✗ on Notify test
-            // workflow), not just the Build check. Without this, a blocked
-            // branch or detection failure left "Notify test workflow" green
-            // and only the Build check red, which was confusing.
-            async function failCheck(title, summary) {
+            // Failure scenarios: red ✗ on both Notify test workflow AND Build,
+            // with a clickable Details URL so the committer can dig in.
+            // details_url defaults to this notify run's logs page when the
+            // caller doesn't pass a more specific URL.
+            async function failCheck(title, summary, details_url) {
               await patchBuildCheck({
                 status: 'completed',
                 conclusion: 'action_required',
+                details_url: details_url || notifyRunUrl,
                 output: { title: title, summary: summary },
               })
               core.setFailed(title)
             }
 
             // Success scenario (non-fork PR): leaves the workflow green.
-            async function passCheck(title, summary) {
+            async function passCheck(title, summary, details_url) {
               await patchBuildCheck({
                 status: 'completed',
                 conclusion: 'success',
+                details_url: details_url || notifyRunUrl,
                 output: { title: title, summary: summary },
               })
             }
@@ -195,72 +213,25 @@ jobs:
                   text: runRefStr,
                 },
               }
+              // Map the fork run's actual status onto the Build check so the
+              // PR icon matches what the fork is doing:
+              //   run completed   → completed / <conclusion>   (green/red/etc.)
+              //   run in_progress → in_progress + started_at   (yellow spinner)
+              //   run queued      → queued                     (gray)
+              // started_at is REQUIRED for in_progress to render as a spinner —
+              // without it the check sometimes shows as "passed" instead.
               if (run.status === 'completed') {
                 patch.status = 'completed'
                 patch.conclusion = run.conclusion
                 if (run.run_started_at) patch.started_at = run.run_started_at
                 if (run.updated_at) patch.completed_at = run.updated_at
+              } else if (run.status === 'in_progress') {
+                patch.status = 'in_progress'
+                patch.started_at = run.run_started_at || new Date().toISOString()
               } else {
                 patch.status = 'queued'
               }
               await patchBuildCheck(patch)
-            }
-
-            // Poll the fork run every 30 s, re-linking the Build check whenever
-            // the fork run's state changes. Exits as soon as the fork run
-            // reaches `completed`, or after `maxMinutes` (whichever comes
-            // first). This keeps the Build check current INLINE — without
-            // depending on update_build_status.yml's cron, which can be
-            // delayed for an hour or more. update_build_status.yml is still
-            // the safety net for fork runs that take longer than maxMinutes.
-            async function pollForkRunUntilCompleted(initialRun, runRefStr, actions_url) {
-              if (initialRun.status === 'completed') return
-
-              const maxMinutes = 30
-              const intervalSec = 30
-              const maxIterations = (maxMinutes * 60) / intervalSec
-              let lastStatus = initialRun.status
-              let lastConclusion = initialRun.conclusion
-
-              console.log('  polling fork run #' + initialRun.id + ' until completion (max ' + maxMinutes + ' min, every ' + intervalSec + ' s)')
-
-              for (let i = 1; i <= maxIterations; i++) {
-                await new Promise(r => setTimeout(r, intervalSec * 1000))
-
-                let updated
-                try {
-                  updated = await github.request(
-                    'GET /repos/{owner}/{repo}/actions/runs/{run_id}',
-                    {
-                      owner: pr.head.repo.owner.login,
-                      repo: pr.head.repo.name,
-                      run_id: initialRun.id,
-                    }
-                  )
-                } catch (error) {
-                  console.log('    poll ' + i + '/' + maxIterations + ': API error: ' + error.message)
-                  continue
-                }
-
-                const r = updated.data
-                const changed = r.status !== lastStatus || r.conclusion !== lastConclusion
-
-                if (changed) {
-                  console.log('    poll ' + i + '/' + maxIterations + ': status=' + r.status + (r.conclusion ? ' conclusion=' + r.conclusion : '') + ' (was ' + lastStatus + ')')
-                  await linkCheck(r, runRefStr, actions_url)
-                  lastStatus = r.status
-                  lastConclusion = r.conclusion
-                } else if (i % 10 === 0) {
-                  console.log('    poll ' + i + '/' + maxIterations + ': still ' + r.status)
-                }
-
-                if (r.status === 'completed') {
-                  console.log('  fork run completed (' + r.conclusion + '); polling done')
-                  return
-                }
-              }
-
-              console.log('  polling timeout reached after ' + maxMinutes + ' min; update_build_status.yml will continue syncing if fork run is still running')
             }
 
             // ----- scenario 1: fork repo gone ----------------------------------
@@ -282,7 +253,12 @@ jobs:
               )
               await failCheck(
                 'Fork repository not accessible',
-                'The PR head repository is null (deleted, private, or otherwise unreachable). Fork CI cannot be detected — see the PR conversation for recovery steps.'
+                ':link: **[See this PR\'s conversation for recovery steps](' + pr.html_url + ')**\n' +
+                '\n' +
+                'The PR head repository is null — the fork has been deleted, made private, or otherwise can\'t be read by the GitHub API. Fork CI cannot detect any workflow runs in an inaccessible repository.\n' +
+                '\n' +
+                '**To fix:** restore (or recreate) the public fork, push your branch back, then close and reopen this PR.\n',
+                pr.html_url
               )
               return
             }
@@ -301,8 +277,11 @@ jobs:
                 'In-tree branches like this one are gated by the **Required Checks** status check (which runs builds directly in `' + baseRepo + '`).\n'
               )
               await passCheck(
-                'Fork CI — not applicable',
-                'This PR is from a branch in `' + baseRepo + '`, not a fork. Fork CI only applies to fork PRs; in-tree branches are gated by the **Required Checks** status check instead.'
+                'Fork CI — not applicable (in-tree PR)',
+                ':link: **[Required Checks workflow runs](' + context.serverUrl + '/' + baseRepo + '/actions/workflows/required-checks.yml)**\n' +
+                '\n' +
+                'This PR is from a branch inside `' + baseRepo + '` itself, not from a fork. Fork CI only applies to fork PRs — in-tree branches are gated by the **Required Checks** status check, which builds directly in `' + baseRepo + '`. The Build check has been auto-passed since fork CI doesn\'t apply.\n',
+                context.serverUrl + '/' + baseRepo + '/actions/workflows/required-checks.yml'
               )
               return
             }
@@ -378,7 +357,16 @@ jobs:
               )
               await failCheck(
                 'Fork CI is not allowed on `' + head_ref + '`',
-                'Fork CI ignores pushes to `' + head_ref + '` (matches the `' + blocked.label + '` pattern in `fork-ci.yml`\'s `branches-ignore`). Open this PR from a different branch — see the PR conversation for instructions specific to `' + blocked.label + '`.'
+                ':link: **[See this PR\'s conversation for branch-specific instructions](' + pr.html_url + ')**\n' +
+                '\n' +
+                'Fork CI deliberately ignores pushes to `' + head_ref + '` (matches the `' + blocked.label + '` pattern in `fork-ci.yml`\'s `branches-ignore`). The required `Build` check stays failed until this PR is reopened from an unblocked branch.\n' +
+                '\n' +
+                '**Why:**\n' +
+                '\n' +
+                blocked.why + '\n' +
+                '\n' +
+                '**Fix:** see the comment on this PR for the branch-specific solution.\n',
+                pr.html_url
               )
               return
             }
@@ -456,9 +444,25 @@ jobs:
                 '   ```\n' +
                 '   The `synchronize` event will re-run this detection and `update_build_status.yml` will pick up the run on its next 15-minute poll.\n'
               )
+              const forkActionsUrl = 'https://github.com/' + headRepo + '/actions'
               await failCheck(
                 'Fork CI run not detected for ' + head_sha.substring(0, 8),
-                'Polled `' + headRepo + '` for ' + maxAttempts + ' attempts (~60s) and found no `fork-ci.yml` run matching commit `' + head_sha + '` on branch `' + head_ref + '`. ' + lastSeenRuns.length + ' unrelated runs were visible. See the PR conversation for the full troubleshooting checklist.'
+                ':link: **[Enable / inspect Actions on `' + headRepo + '`](' + forkActionsUrl + ')**\n' +
+                '\n' +
+                seenSummary + '\n' +
+                '\n' +
+                'Polled `' + headRepo + '` for ' + maxAttempts + ' attempts (~60s) and found **no `fork-ci.yml` run matching commit `' + head_sha + '`** on branch `' + head_ref + '`. ' + lastSeenRuns.length + ' unrelated runs were visible.\n' +
+                '\n' +
+                '**Most likely fixes:**\n' +
+                '1. Click the link above to open your fork\'s Actions tab. If Actions are disabled, click *"I understand my workflows, go ahead and enable them"*.\n' +
+                '2. Sync your fork from upstream so `fork-ci.yml` is present, then push an empty commit:\n' +
+                '   ```bash\n' +
+                '   git commit --allow-empty -m "retrigger fork CI"\n' +
+                '   git push\n' +
+                '   ```\n' +
+                '\n' +
+                'See the PR conversation for the full troubleshooting checklist.\n',
+                forkActionsUrl
               )
               return
             }
@@ -478,7 +482,7 @@ jobs:
 
             console.log('SCENARIO: detection success — fork run id=' + matchingRun.id + ' status=' + matchingRun.status + ' conclusion=' + matchingRun.conclusion)
             await linkCheck(matchingRun, runRefStr, actions_url)
-            // Keep the Build check current inline. Polls until fork run
-            // reaches `completed` (or 30 min timeout). No dependency on the
-            // separate update_build_status.yml cron for the common case.
-            await pollForkRunUntilCompleted(matchingRun, runRefStr, actions_url)
+            // Notify exits here. update_build_status.yml advances queued/
+            // in_progress Build checks toward terminal as the fork run
+            // progresses (workflow_run trigger fires it right after this
+            // workflow completes; cron picks up later state changes).
