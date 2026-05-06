@@ -34,6 +34,7 @@ jobs:
     permissions:
       actions: read
       checks: write
+      pull-requests: write
     steps:
       - name: "Notify test workflow"
         uses: actions/github-script@v8
@@ -88,6 +89,52 @@ jobs:
                 }
               })
               return
+            }
+
+            // PRs from the fork's `main` branch are unusual — fork CI still
+            // runs, but every upstream sync rewrites HEAD and invalidates the
+            // CI run, and shared `main` makes it hard to track multiple PRs.
+            // Post a one-time advisory comment so the contributor knows.
+            if (head_ref === 'main') {
+              const COMMENT_MARKER = '<!-- fork-ci-main-warning -->'
+              try {
+                const comments = await github.paginate(github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  per_page: 100,
+                })
+                const alreadyPosted = comments.some(c => c.body && c.body.includes(COMMENT_MARKER))
+                if (alreadyPosted) {
+                  console.log('Fork-from-main warning already posted on PR #' + pr.number + '; skipping.')
+                } else {
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pr.number,
+                    body: COMMENT_MARKER + '\n' +
+                      ':warning: **Heads up — this PR is from your fork\'s `main` branch.**\n' +
+                      '\n' +
+                      'Fork CI will still run, but opening PRs from `main` is not the recommended workflow:\n' +
+                      '\n' +
+                      '- Every time you sync your fork from upstream, your branch HEAD moves and any in-flight CI run is invalidated.\n' +
+                      '- You can only have one PR open from `main` at a time, so it gets in the way of working on multiple changes.\n' +
+                      '- Reviewers may ask you to rebase onto a feature branch before merge.\n' +
+                      '\n' +
+                      'For your next change, please use a feature branch instead:\n' +
+                      '\n' +
+                      '```bash\n' +
+                      'git checkout -b feat/your-change\n' +
+                      'git commit -am "your change"\n' +
+                      'git push origin feat/your-change\n' +
+                      '# then open the PR from the feature branch\n' +
+                      '```\n',
+                  })
+                  console.log('Posted fork-from-main warning comment on PR #' + pr.number)
+                }
+              } catch (error) {
+                console.error('Failed to post warning comment: ' + error.message)
+              }
             }
 
             // Poll the fork for a fork-ci.yml run matching this PR's head SHA.
