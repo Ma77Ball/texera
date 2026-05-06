@@ -40,43 +40,42 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const endpoint = 'GET /repos/:owner/:repo/actions/workflows/:id/runs?&branch=:branch'
-
-            // TODO: Should use pull_request.user and pull_request.user.repos_url?
-            // If a different person creates a commit to another forked repo,
-            // it wouldn't be able to detect.
-            const params = {
-              owner: context.payload.pull_request.head.repo.owner.login,
-              repo: context.payload.pull_request.head.repo.name,
-              id: 'fork-ci.yml',
-              branch: context.payload.pull_request.head.ref,
-            }
-
-            console.log('Ref: ' + context.payload.pull_request.head.ref)
-            console.log('SHA: ' + context.payload.pull_request.head.sha)
-
-            // Wait 3 seconds to make sure the fork repository triggered a workflow.
-            await new Promise(r => setTimeout(r, 3000))
-
-            let runs
-            try {
-              runs = await github.request(endpoint, params)
-            } catch (error) {
-              console.error(error)
-              // Assume that runs were not found.
-            }
-
             const name = 'Build'
-            const head_sha = context.payload.pull_request.head.sha
-            let status = 'queued'
+            const pr = context.payload.pull_request
+            const head_sha = pr.head.sha
+            const head_ref = pr.head.ref
+            const headRepo = pr.head.repo ? pr.head.repo.full_name : null
+            const baseRepo = context.repo.owner + '/' + context.repo.repo
 
-            // Non-fork PRs (branch opened directly in apache/texera) don't run
+            console.log('PR #' + pr.number)
+            console.log('  head ref:  ' + head_ref)
+            console.log('  head sha:  ' + head_sha)
+            console.log('  head repo: ' + headRepo)
+            console.log('  base repo: ' + baseRepo)
+
+            if (!pr.head.repo) {
+              console.log('Head repo is null (fork deleted?). Failing the Build check.')
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: name,
+                head_sha: head_sha,
+                status: 'completed',
+                conclusion: 'action_required',
+                output: {
+                  title: 'Fork repository not accessible',
+                  summary: 'The PR head repository is not accessible (it may have been deleted or made private). Fork CI cannot be detected.',
+                }
+              })
+              return
+            }
+
+            // Non-fork PRs (branch opened directly in the base repo) don't run
             // fork-ci.yml. Auto-pass the Build check — those PRs are gated by
             // the "Required Checks" status check instead.
-            const headRepo = context.payload.pull_request.head.repo.full_name
-            const baseRepo = context.repo.owner + '/' + context.repo.repo
             if (headRepo === baseRepo) {
-              github.rest.checks.create({
+              console.log('Non-fork PR (head==base). Auto-passing Build check.')
+              await github.rest.checks.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 name: name,
@@ -91,59 +90,105 @@ jobs:
               return
             }
 
-            if (!runs || runs.data.workflow_runs.length === 0) {
-              status = 'completed'
-              const conclusion = 'action_required'
+            // Poll the fork for a fork-ci.yml run matching this PR's head SHA.
+            // GitHub Actions can take 10–30s+ to register a queued run, so a
+            // single 3s wait misses most runs. We poll up to ~60s and search
+            // the 10 most recent runs (not just the first) so a stale earlier
+            // run on the same branch can't shadow the right one.
+            const maxAttempts = 7
+            const delays = [3000, 7000, 10000, 10000, 10000, 10000, 10000]
+            let matchingRun = null
+            let lastSeenRuns = []
 
-              github.rest.checks.create({
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              await new Promise(r => setTimeout(r, delays[attempt - 1]))
+
+              let runs
+              try {
+                runs = await github.request(
+                  'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
+                  {
+                    owner: pr.head.repo.owner.login,
+                    repo: pr.head.repo.name,
+                    workflow_id: 'fork-ci.yml',
+                    branch: head_ref,
+                    per_page: 10,
+                  }
+                )
+              } catch (error) {
+                console.log('Attempt ' + attempt + '/' + maxAttempts + ': API error: ' + error.message)
+                continue
+              }
+
+              lastSeenRuns = runs.data.workflow_runs
+              console.log('Attempt ' + attempt + '/' + maxAttempts + ': found ' + lastSeenRuns.length + ' fork-ci runs on ' + head_ref)
+              for (const r of lastSeenRuns) {
+                console.log('  run id=' + r.id + ' sha=' + r.head_sha + ' status=' + r.status + ' conclusion=' + r.conclusion)
+              }
+
+              matchingRun = lastSeenRuns.find(r => r.head_sha === head_sha)
+              if (matchingRun) {
+                console.log('Match found: run id=' + matchingRun.id)
+                break
+              }
+              console.log('  no run matches PR head sha ' + head_sha + ' yet')
+            }
+
+            if (!matchingRun) {
+              console.log('FAILURE: no fork-ci run matched PR head sha after ' + maxAttempts + ' attempts.')
+              await github.rest.checks.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 name: name,
                 head_sha: head_sha,
-                status: status,
-                conclusion: conclusion,
+                status: 'completed',
+                conclusion: 'action_required',
                 output: {
                   title: 'Workflow run detection failed',
                   summary: `
-            Unable to detect the workflow run for testing the changes in your PR.
+            Unable to detect a fork-ci.yml run on \`${headRepo}\` for branch \`${head_ref}\` matching commit \`${head_sha}\`.
 
-            1. If you did not enable GitHub Actions in your forked repository, please enable it by clicking the button as shown in the image below. See also [Managing Github Actions Settings for a repository](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository) for more details.
-            2. It is possible your branch is based on the old \`main\` branch in Apache Texera, please sync your branch to the latest main branch. For example as below:
+            1. **Enable GitHub Actions in your fork** if it's disabled — Actions tab → "I understand my workflows, go ahead and enable them". See [Managing GitHub Actions settings](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/enabling-features-for-your-repository/managing-github-actions-settings-for-a-repository).
+            2. **Sync your branch** with the latest main:
                 \`\`\`bash
                 git fetch upstream
                 git rebase upstream/main
                 git push origin YOUR_BRANCH --force
-                \`\`\``,
+                \`\`\`
+            3. After fixing the above, push an empty commit to retrigger this check:
+                \`\`\`bash
+                git commit --allow-empty -m "retrigger fork CI"
+                git push
+                \`\`\`
+            `,
                 }
               })
-            } else {
-              const run_id = runs.data.workflow_runs[0].id
-
-              if (runs.data.workflow_runs[0].head_sha != context.payload.pull_request.head.sha) {
-                throw new Error('There was a new unsynced commit pushed. Please retrigger the workflow.');
-              }
-
-              const actions_url = 'https://github.com/'
-                + context.payload.pull_request.head.repo.full_name
-                + '/actions/runs/'
-                + run_id
-              console.log('Actions URL: ' + actions_url)
-
-              github.rest.checks.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: name,
-                head_sha: head_sha,
-                status: status,
-                output: {
-                  title: 'Test results',
-                  summary: '[See test results](' + actions_url + ')',
-                  text: JSON.stringify({
-                    owner: context.payload.pull_request.head.repo.owner.login,
-                    repo: context.payload.pull_request.head.repo.name,
-                    run_id: run_id
-                  })
-                },
-                details_url: actions_url,
-              })
+              return
             }
+
+            // Found a matching run — create a check pointing to it.
+            const actions_url = 'https://github.com/' + headRepo + '/actions/runs/' + matchingRun.id
+            console.log('Creating Build check (status=' + matchingRun.status + ') -> ' + actions_url)
+
+            const checkData = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: name,
+              head_sha: head_sha,
+              status: matchingRun.status,
+              output: {
+                title: 'Test results',
+                summary: '[See test results](' + actions_url + ')',
+                text: JSON.stringify({
+                  owner: pr.head.repo.owner.login,
+                  repo: pr.head.repo.name,
+                  run_id: matchingRun.id
+                })
+              },
+              details_url: actions_url,
+            }
+            if (matchingRun.status === 'completed') {
+              checkData.conclusion = matchingRun.conclusion
+            }
+
+            await github.rest.checks.create(checkData)
