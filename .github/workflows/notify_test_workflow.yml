@@ -114,29 +114,50 @@ jobs:
             // Patch the up-front Build check with a terminal state. Every
             // scenario routes through one of failCheck / passCheck / linkCheck
             // so the check_run is updated in place, never recreated.
+            //
+            // Retries with exponential backoff (1 s → 2 s → 4 s) so a transient
+            // GitHub API blip doesn't leave the Build check stuck at the
+            // "Detecting…" placeholder. If all 3 attempts fail, marks the
+            // workflow as failed via core.setFailed so the absence of a
+            // linked Build is visible — never silent.
             async function patchBuildCheck(patch) {
-              try {
-                await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  check_run_id: buildCheckId,
-                  ...patch,
-                })
-                console.log('  -> Build check ' + buildCheckId + ' patched: status=' + patch.status + (patch.conclusion ? ' conclusion=' + patch.conclusion : ''))
-              } catch (error) {
-                console.error('  -> FAILED to patch Build check ' + buildCheckId + ': ' + error.message)
-                core.setFailed('Could not patch Build check: ' + error.message)
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                  await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    check_run_id: buildCheckId,
+                    ...patch,
+                  })
+                  console.log('  -> Build check ' + buildCheckId + ' patched: status=' + patch.status + (patch.conclusion ? ' conclusion=' + patch.conclusion : ''))
+                  return
+                } catch (error) {
+                  if (attempt < 3) {
+                    const delay = 1000 * Math.pow(2, attempt - 1)
+                    console.error('  -> patch attempt ' + attempt + '/3 failed: ' + error.message + '; retrying in ' + (delay / 1000) + 's')
+                    await new Promise(r => setTimeout(r, delay))
+                  } else {
+                    console.error('  -> FAILED to patch Build check after 3 attempts: ' + error.message)
+                    core.setFailed('Could not patch Build check after retries: ' + error.message)
+                  }
+                }
               }
             }
 
+            // Failure scenarios fail the workflow itself (red ✗ on Notify test
+            // workflow), not just the Build check. Without this, a blocked
+            // branch or detection failure left "Notify test workflow" green
+            // and only the Build check red, which was confusing.
             async function failCheck(title, summary) {
               await patchBuildCheck({
                 status: 'completed',
                 conclusion: 'action_required',
                 output: { title: title, summary: summary },
               })
+              core.setFailed(title)
             }
 
+            // Success scenario (non-fork PR): leaves the workflow green.
             async function passCheck(title, summary) {
               await patchBuildCheck({
                 status: 'completed',
@@ -183,6 +204,63 @@ jobs:
                 patch.status = 'queued'
               }
               await patchBuildCheck(patch)
+            }
+
+            // Poll the fork run every 30 s, re-linking the Build check whenever
+            // the fork run's state changes. Exits as soon as the fork run
+            // reaches `completed`, or after `maxMinutes` (whichever comes
+            // first). This keeps the Build check current INLINE — without
+            // depending on update_build_status.yml's cron, which can be
+            // delayed for an hour or more. update_build_status.yml is still
+            // the safety net for fork runs that take longer than maxMinutes.
+            async function pollForkRunUntilCompleted(initialRun, runRefStr, actions_url) {
+              if (initialRun.status === 'completed') return
+
+              const maxMinutes = 30
+              const intervalSec = 30
+              const maxIterations = (maxMinutes * 60) / intervalSec
+              let lastStatus = initialRun.status
+              let lastConclusion = initialRun.conclusion
+
+              console.log('  polling fork run #' + initialRun.id + ' until completion (max ' + maxMinutes + ' min, every ' + intervalSec + ' s)')
+
+              for (let i = 1; i <= maxIterations; i++) {
+                await new Promise(r => setTimeout(r, intervalSec * 1000))
+
+                let updated
+                try {
+                  updated = await github.request(
+                    'GET /repos/{owner}/{repo}/actions/runs/{run_id}',
+                    {
+                      owner: pr.head.repo.owner.login,
+                      repo: pr.head.repo.name,
+                      run_id: initialRun.id,
+                    }
+                  )
+                } catch (error) {
+                  console.log('    poll ' + i + '/' + maxIterations + ': API error: ' + error.message)
+                  continue
+                }
+
+                const r = updated.data
+                const changed = r.status !== lastStatus || r.conclusion !== lastConclusion
+
+                if (changed) {
+                  console.log('    poll ' + i + '/' + maxIterations + ': status=' + r.status + (r.conclusion ? ' conclusion=' + r.conclusion : '') + ' (was ' + lastStatus + ')')
+                  await linkCheck(r, runRefStr, actions_url)
+                  lastStatus = r.status
+                  lastConclusion = r.conclusion
+                } else if (i % 10 === 0) {
+                  console.log('    poll ' + i + '/' + maxIterations + ': still ' + r.status)
+                }
+
+                if (r.status === 'completed') {
+                  console.log('  fork run completed (' + r.conclusion + '); polling done')
+                  return
+                }
+              }
+
+              console.log('  polling timeout reached after ' + maxMinutes + ' min; update_build_status.yml will continue syncing if fork run is still running')
             }
 
             // ----- scenario 1: fork repo gone ----------------------------------
@@ -400,3 +478,7 @@ jobs:
 
             console.log('SCENARIO: detection success — fork run id=' + matchingRun.id + ' status=' + matchingRun.status + ' conclusion=' + matchingRun.conclusion)
             await linkCheck(matchingRun, runRefStr, actions_url)
+            // Keep the Build check current inline. Polls until fork run
+            // reaches `completed` (or 30 min timeout). No dependency on the
+            // separate update_build_status.yml cron for the common case.
+            await pollForkRunUntilCompleted(matchingRun, runRefStr, actions_url)
