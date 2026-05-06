@@ -61,47 +61,87 @@ jobs:
 
                   // Iterator GitHub Checks in the PR
                   for await (const cr of checkRuns.data.check_runs) {
-                    if (cr.name == 'Build' && cr.conclusion != "action_required") {
-                      // text contains parameters to make request in JSON.
-                      const params = JSON.parse(cr.output.text)
+                    if (cr.name !== 'Build') continue
 
-                      // Get the workflow run in the forked repository
-                      let run
+                    if (cr.conclusion === 'action_required') {
+                      // notify_test_workflow ran before the fork CI could start (3 s race).
+                      // Re-check the fork now; if a matching run exists, recover the check.
+                      if (!pr.head.repo) break
                       try {
-                        run = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', params)
+                        const forkRuns = await github.request(
+                          'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
+                          {
+                            owner: pr.head.repo.owner.login,
+                            repo: pr.head.repo.name,
+                            workflow_id: 'fork-ci.yml',
+                            branch: pr.head.ref,
+                            per_page: 1
+                          }
+                        )
+                        const wr = forkRuns.data.workflow_runs[0]
+                        if (wr && wr.head_sha === pr.head.sha) {
+                          const actions_url = 'https://github.com/' + pr.head.repo.full_name + '/actions/runs/' + wr.id
+                          const patch = {
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            check_run_id: cr.id,
+                            status: wr.status,
+                            output: {
+                              title: 'Test results',
+                              summary: '[See test results](' + actions_url + ')',
+                              text: JSON.stringify({ owner: pr.head.repo.owner.login, repo: pr.head.repo.name, run_id: wr.id })
+                            },
+                            details_url: actions_url
+                          }
+                          if (wr.status === 'completed') patch.conclusion = wr.conclusion
+                          await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', patch)
+                          console.log('    Run ' + cr.id + ': recovered from action_required, status ' + wr.status)
+                        }
                       } catch (error) {
                         console.error(error)
-                        // Run not found. This can happen when the PR author removes GitHub Actions runs or
-                        // disables GitHub Actions.
-                        continue
                       }
-
-                      // Keep syncing the status of the checks
-                      if (run.data.status == 'completed') {
-                        console.log('    Run ' + cr.id + ': set status (' + run.data.status + ') and conclusion (' + run.data.conclusion + ')')
-                        const response = await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                          owner: context.repo.owner,
-                          repo: context.repo.repo,
-                          check_run_id: cr.id,
-                          output: cr.output,
-                          status: run.data.status,
-                          conclusion: run.data.conclusion,
-                          details_url: run.data.details_url
-                        })
-                      } else {
-                        console.log('    Run ' + cr.id + ': set status (' + run.data.status + ')')
-                        const response = await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                          owner: context.repo.owner,
-                          repo: context.repo.repo,
-                          check_run_id: cr.id,
-                          output: cr.output,
-                          status: run.data.status,
-                          details_url: run.data.details_url
-                        })
-                      }
-
                       break
                     }
+
+                    // text contains parameters to make request in JSON.
+                    const params = JSON.parse(cr.output.text)
+
+                    // Get the workflow run in the forked repository
+                    let run
+                    try {
+                      run = await github.request('GET /repos/{owner}/{repo}/actions/runs/{run_id}', params)
+                    } catch (error) {
+                      console.error(error)
+                      // Run not found. This can happen when the PR author removes GitHub Actions runs or
+                      // disables GitHub Actions.
+                      continue
+                    }
+
+                    // Keep syncing the status of the checks
+                    if (run.data.status == 'completed') {
+                      console.log('    Run ' + cr.id + ': set status (' + run.data.status + ') and conclusion (' + run.data.conclusion + ')')
+                      const response = await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        check_run_id: cr.id,
+                        output: cr.output,
+                        status: run.data.status,
+                        conclusion: run.data.conclusion,
+                        details_url: run.data.details_url
+                      })
+                    } else {
+                      console.log('    Run ' + cr.id + ': set status (' + run.data.status + ')')
+                      const response = await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        check_run_id: cr.id,
+                        output: cr.output,
+                        status: run.data.status,
+                        details_url: run.data.details_url
+                      })
+                    }
+
+                    break
                   }
                 }
               }
