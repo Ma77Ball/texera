@@ -53,6 +53,36 @@ jobs:
             console.log('  head sha:  ' + head_sha)
             console.log('  event:     ' + context.payload.action)
 
+            // ----- create the Build check up front -----------------------------
+            // The Build check is GUARANTEED to exist before any scenario runs.
+            // Every scenario PATCHes this same check to its terminal state.
+            // Without this, any unexpected failure in a scenario branch would
+            // leave the PR with no Build check at all.
+            let buildCheckId = null
+            try {
+              const created = await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: name,
+                head_sha: head_sha,
+                status: 'queued',
+                output: {
+                  title: 'Fork CI: detecting…',
+                  summary:
+                    'Initializing the Build check. This will be updated in a few seconds with one of:\n' +
+                    '\n' +
+                    '- Link to the fork CI workflow run (success path)\n' +
+                    '- Failure with troubleshooting steps (Actions disabled, run not found, blocked branch, etc.)\n',
+                },
+              })
+              buildCheckId = created.data.id
+              console.log('Created initial Build check id=' + buildCheckId)
+            } catch (error) {
+              console.error('FAILED to create initial Build check: ' + error.message)
+              core.setFailed('Could not create Build check: ' + error.message)
+              return
+            }
+
             // ----- helpers ------------------------------------------------------
 
             // Post a comment once per unique marker. Idempotent across re-runs
@@ -81,13 +111,26 @@ jobs:
               }
             }
 
+            // Patch the up-front Build check with a terminal state. Every
+            // scenario routes through one of failCheck / passCheck / linkCheck
+            // so the check_run is updated in place, never recreated.
+            async function patchBuildCheck(patch) {
+              try {
+                await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  check_run_id: buildCheckId,
+                  ...patch,
+                })
+                console.log('  -> Build check ' + buildCheckId + ' patched: status=' + patch.status + (patch.conclusion ? ' conclusion=' + patch.conclusion : ''))
+              } catch (error) {
+                console.error('  -> FAILED to patch Build check ' + buildCheckId + ': ' + error.message)
+                core.setFailed('Could not patch Build check: ' + error.message)
+              }
+            }
+
             async function failCheck(title, summary) {
-              console.log('  -> Build: action_required (' + title + ')')
-              await github.rest.checks.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: name,
-                head_sha: head_sha,
+              await patchBuildCheck({
                 status: 'completed',
                 conclusion: 'action_required',
                 output: { title: title, summary: summary },
@@ -95,16 +138,51 @@ jobs:
             }
 
             async function passCheck(title, summary) {
-              console.log('  -> Build: success (' + title + ')')
-              await github.rest.checks.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: name,
-                head_sha: head_sha,
+              await patchBuildCheck({
                 status: 'completed',
                 conclusion: 'success',
                 output: { title: title, summary: summary },
               })
+            }
+
+            async function linkCheck(run, runRefStr, actions_url) {
+              const stateLabel = run.status === 'completed'
+                ? 'completed / ' + run.conclusion
+                : run.status
+              const summary =
+                ':link: **[View fork CI run on `' + headRepo + '`](' + actions_url + ')**\n' +
+                '\n' +
+                'This check mirrors the `fork-ci.yml` workflow run on `' + headRepo + ':' + head_ref + '` for commit `' + head_sha.substring(0, 8) + '`. ' +
+                (run.status === 'completed'
+                  ? 'The fork run has already finished — the result above is final.'
+                  : 'It will advance to `in_progress` and then `completed` automatically as the fork run progresses, via the `update_build_status.yml` workflow that polls every 5 minutes.') + '\n' +
+                '\n' +
+                '| Field | Value |\n' +
+                '|---|---|\n' +
+                '| Fork repo | `' + headRepo + '` |\n' +
+                '| Branch | `' + head_ref + '` |\n' +
+                '| Commit | `' + head_sha + '` |\n' +
+                '| Run ID | [`' + run.id + '`](' + actions_url + ') |\n' +
+                '| Run status | `' + run.status + '` |\n' +
+                '| Run conclusion | `' + (run.conclusion || '(pending)') + '` |\n'
+              const patch = {
+                external_id: String(run.id),
+                details_url: actions_url,
+                output: {
+                  title: 'Fork CI run #' + run.id + ' (' + stateLabel + ')',
+                  summary: summary,
+                  text: runRefStr,
+                },
+              }
+              if (run.status === 'completed') {
+                patch.status = 'completed'
+                patch.conclusion = run.conclusion
+                if (run.run_started_at) patch.started_at = run.run_started_at
+                if (run.updated_at) patch.completed_at = run.updated_at
+              } else {
+                patch.status = 'queued'
+              }
+              await patchBuildCheck(patch)
             }
 
             // ----- scenario 1: fork repo gone ----------------------------------
@@ -308,29 +386,17 @@ jobs:
             }
 
             // ----- scenario 5: detection success -------------------------------
+            // Found a matching fork CI run — link the Build check to it.
+            // linkCheck handles both the in-progress (status=queued, advanced
+            // by update_build_status.yml) and already-completed (status=
+            // completed with the run's conclusion) cases, so the committer
+            // always has a clickable link to the fork CI run for review.
             const actions_url = 'https://github.com/' + headRepo + '/actions/runs/' + matchingRun.id
-            console.log('SCENARIO: detection success — fork run status=' + matchingRun.status + ' conclusion=' + matchingRun.conclusion)
-            console.log('  -> Build: status=' + matchingRun.status + (matchingRun.status === 'completed' ? ' conclusion=' + matchingRun.conclusion : '') + ' (' + actions_url + ')')
+            const runRefStr = JSON.stringify({
+              owner: pr.head.repo.owner.login,
+              repo: pr.head.repo.name,
+              run_id: matchingRun.id,
+            })
 
-            const checkData = {
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name: name,
-              head_sha: head_sha,
-              status: matchingRun.status,
-              output: {
-                title: 'Fork CI: ' + matchingRun.status + (matchingRun.status === 'completed' ? ' (' + matchingRun.conclusion + ')' : ''),
-                summary: '[See test results on `' + headRepo + '`](' + actions_url + ')',
-                text: JSON.stringify({
-                  owner: pr.head.repo.owner.login,
-                  repo: pr.head.repo.name,
-                  run_id: matchingRun.id
-                })
-              },
-              details_url: actions_url,
-            }
-            if (matchingRun.status === 'completed') {
-              checkData.conclusion = matchingRun.conclusion
-            }
-
-            await github.rest.checks.create(checkData)
+            console.log('SCENARIO: detection success — fork run id=' + matchingRun.id + ' status=' + matchingRun.status + ' conclusion=' + matchingRun.conclusion)
+            await linkCheck(matchingRun, runRefStr, actions_url)
