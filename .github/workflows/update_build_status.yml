@@ -22,10 +22,19 @@ name: Update build status workflow
 on:
   schedule:
     # Every 5 minutes (the GitHub Actions minimum). Fork CI completion isn't
-    # observable via workflow_run (the run lives in the fork, not here), so
-    # polling is the only mechanism to push the final conclusion onto the
-    # PR's Build check.
+    # observable via workflow_run from the fork (the run lives in a different
+    # repo), so a periodic poll is the only general-purpose mechanism to push
+    # the fork run's final conclusion onto the PR's Build check.
     - cron: "*/5 * * * *"
+  # Fires immediately after notify_test_workflow.yml finishes for any PR
+  # event. Guarantees at least one sync run per PR open/synchronize without
+  # waiting for the next cron tick — important because GitHub's scheduled
+  # workflows can be delayed by an hour or more after first being added.
+  workflow_run:
+    workflows: ["On pull request update"]
+    types: [completed]
+  # Manual button on the Actions tab for ad-hoc forced syncs (testing,
+  # debugging, recovering from a missed cron tick).
   workflow_dispatch:
 
 jobs:
@@ -58,12 +67,47 @@ jobs:
               for (const pr of prs.data) {
                 prCount++
                 console.log('PR #' + pr.number + ' (' + pr.head.sha.substring(0, 8) + ', mergeable_state=' + pr.mergeable_state + ')')
-                {
+                try {
                   const checkRuns = await github.request('GET /repos/{owner}/{repo}/commits/{ref}/check-runs', {
                     owner: context.repo.owner,
                     repo: context.repo.repo,
-                    ref: pr.head.sha
+                    ref: pr.head.sha,
+                    per_page: 100,
                   })
+
+                  // Process the most-recently-created Build check (highest id).
+                  // Multiple "Build" checks can exist on the same SHA if
+                  // notify_test_workflow ran more than once (reopen +
+                  // synchronize on the same commit) — only the newest is
+                  // surfaced on the PR, so that's the one to update.
+                  checkRuns.data.check_runs.sort((a, b) => b.id - a.id)
+                  console.log('  ' + checkRuns.data.check_runs.length + ' total check_runs on ' + pr.head.sha.substring(0, 8) + '; Build checks: ' +
+                    checkRuns.data.check_runs.filter(c => c.name === 'Build').map(c => c.id + '(' + c.status + '/' + c.conclusion + ')').join(', ') || '(none)')
+
+                  // Helper: build the standard Build-check output object.
+                  // Keeps title/summary in sync with notify_test_workflow.yml's
+                  // detection-success path so the rendering is consistent
+                  // regardless of which workflow last touched the check.
+                  function buildOutput(run, runRef) {
+                    const repoFull = run.repository ? run.repository.full_name : (runRef.owner + '/' + runRef.repo)
+                    const url = run.html_url || ('https://github.com/' + repoFull + '/actions/runs/' + run.id)
+                    const stateLabel = run.status + (run.status === 'completed' ? ' / ' + run.conclusion : '')
+                    return {
+                      title: 'Fork CI run #' + run.id + ' (' + stateLabel + ')',
+                      summary:
+                        ':link: **[View fork CI run on `' + repoFull + '`](' + url + ')**\n' +
+                        '\n' +
+                        'Mirroring fork-ci.yml run `#' + run.id + '` on `' + repoFull + '`. Current run state: **`' + stateLabel + '`**.\n' +
+                        '\n' +
+                        '| Field | Value |\n' +
+                        '|---|---|\n' +
+                        '| Fork repo | `' + repoFull + '` |\n' +
+                        '| Run ID | [`' + run.id + '`](' + url + ') |\n' +
+                        '| Status | `' + run.status + '` |\n' +
+                        '| Conclusion | `' + (run.conclusion || '(pending)') + '` |\n',
+                      text: JSON.stringify({ owner: runRef.owner, repo: runRef.repo, run_id: run.id }),
+                    }
+                  }
 
                   // Find the most recent Build check for this PR's head SHA.
                   // Iterates newest-first; we act on the first Build we find.
@@ -73,17 +117,9 @@ jobs:
                     buildSeen = true
                     console.log('  Build check id=' + cr.id + ' status=' + cr.status + ' conclusion=' + cr.conclusion)
 
-                    // Already terminal and synced (success / failure / cancelled / timed_out).
-                    // No further updates possible from the fork run side.
-                    if (cr.status === 'completed' && cr.conclusion !== 'action_required') {
-                      console.log('  -> already terminal; nothing to do')
-                      break
-                    }
-
                     if (cr.conclusion === 'action_required') {
-                      // notify_test_workflow ran before the fork CI could start
-                      // (poll race). Re-check the fork now; if a matching run
-                      // exists, recover the check.
+                      // notify_test_workflow couldn't find a matching run when
+                      // the PR opened (poll race). Re-check the fork now.
                       if (!pr.head.repo) {
                         console.log('  -> head repo null; cannot recover')
                         break
@@ -100,26 +136,33 @@ jobs:
                           }
                         )
                         const wr = forkRuns.data.workflow_runs.find(r => r.head_sha === pr.head.sha)
-                        if (wr) {
-                          const actions_url = 'https://github.com/' + pr.head.repo.full_name + '/actions/runs/' + wr.id
-                          const patch = {
-                            owner: context.repo.owner,
-                            repo: context.repo.repo,
-                            check_run_id: cr.id,
-                            status: wr.status,
-                            output: {
-                              title: 'Fork CI: ' + wr.status + (wr.status === 'completed' ? ' (' + wr.conclusion + ')' : ''),
-                              summary: '[See test results on `' + pr.head.repo.full_name + '`](' + actions_url + ')',
-                              text: JSON.stringify({ owner: pr.head.repo.owner.login, repo: pr.head.repo.name, run_id: wr.id })
-                            },
-                            details_url: actions_url,
-                          }
-                          if (wr.status === 'completed') patch.conclusion = wr.conclusion
+                        if (!wr) {
+                          console.log('  -> no fork run matches ' + pr.head.sha + '; staying action_required')
+                          break
+                        }
+                        const actions_url = 'https://github.com/' + pr.head.repo.full_name + '/actions/runs/' + wr.id
+                        const runRef = { owner: pr.head.repo.owner.login, repo: pr.head.repo.name, run_id: wr.id }
+                        const patch = {
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          check_run_id: cr.id,
+                          external_id: String(wr.id),
+                          status: wr.status === 'completed' ? 'completed' : 'in_progress',
+                          details_url: actions_url,
+                          output: buildOutput(wr, runRef),
+                        }
+                        if (wr.run_started_at) patch.started_at = wr.run_started_at
+                        if (wr.status === 'completed') {
+                          patch.conclusion = wr.conclusion
+                          if (wr.updated_at) patch.completed_at = wr.updated_at
+                        }
+                        try {
                           await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', patch)
                           updateCount++
-                          console.log('  -> recovered from action_required: status=' + wr.status + (wr.status === 'completed' ? ' conclusion=' + wr.conclusion : ''))
-                        } else {
-                          console.log('  -> no fork run matches ' + pr.head.sha + '; staying action_required')
+                          console.log('  -> recovered from action_required: status=' + patch.status + (patch.conclusion ? ' conclusion=' + patch.conclusion : ''))
+                        } catch (error) {
+                          console.error('  -> PATCH (recovery) FAILED: ' + error.status + ' ' + error.message)
+                          console.error('     payload: ' + JSON.stringify(patch))
                         }
                       } catch (error) {
                         console.error('  -> recovery error: ' + error.message)
@@ -127,8 +170,8 @@ jobs:
                       break
                     }
 
-                    // Normal sync path: notify created the check pointing to a
-                    // known fork run; pull the run's current state and patch.
+                    // Normal sync path: notify stored a fork run reference in
+                    // output.text. Pull that run's current state and patch.
                     let runRef
                     try {
                       runRef = JSON.parse(cr.output.text)
@@ -145,29 +188,51 @@ jobs:
                       break
                     }
 
+                    // Skip the redundant PATCH only when the fork run AND the
+                    // local check are both terminal and agree on the
+                    // conclusion. Trusting the local check alone (the previous
+                    // bug) caused stale "success" displays to never refresh.
+                    if (
+                      run.data.status === 'completed' &&
+                      cr.status === 'completed' &&
+                      cr.conclusion === run.data.conclusion
+                    ) {
+                      console.log('  -> already in sync (terminal); nothing to do')
+                      break
+                    }
+
                     const patch = {
                       owner: context.repo.owner,
                       repo: context.repo.repo,
                       check_run_id: cr.id,
-                      output: {
-                        title: 'Fork CI: ' + run.data.status + (run.data.status === 'completed' ? ' (' + run.data.conclusion + ')' : ''),
-                        summary: '[See test results on `' + run.data.repository.full_name + '`](' + run.data.html_url + ')',
-                        text: cr.output.text,
-                      },
-                      status: run.data.status,
+                      external_id: String(run.data.id),
+                      status: run.data.status === 'completed' ? 'completed' : (run.data.status === 'queued' ? 'queued' : 'in_progress'),
                       details_url: run.data.html_url,
+                      output: buildOutput(run.data, runRef),
                     }
-                    if (run.data.status === 'completed') patch.conclusion = run.data.conclusion
+                    if (run.data.run_started_at) patch.started_at = run.data.run_started_at
+                    if (run.data.status === 'completed') {
+                      patch.conclusion = run.data.conclusion
+                      if (run.data.updated_at) patch.completed_at = run.data.updated_at
+                    }
 
-                    await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', patch)
-                    updateCount++
-                    console.log('  -> synced: status=' + run.data.status + (run.data.status === 'completed' ? ' conclusion=' + run.data.conclusion : ''))
+                    try {
+                      await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', patch)
+                      updateCount++
+                      console.log('  -> synced: status=' + patch.status + (patch.conclusion ? ' conclusion=' + patch.conclusion : ''))
+                    } catch (error) {
+                      console.error('  -> PATCH (sync) FAILED: ' + error.status + ' ' + error.message)
+                      console.error('     payload: ' + JSON.stringify(patch))
+                    }
 
                     break
                   }
                   if (!buildSeen) {
                     console.log('  no Build check on this PR (notify_test_workflow may not have run yet)')
                   }
+                } catch (error) {
+                  console.error('  PR processing failed: ' + error.message)
+                  console.error('     stack: ' + (error.stack || '<no stack>'))
                 }
               }
             }
