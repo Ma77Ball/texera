@@ -35,6 +35,7 @@ name: Fork CI
 on:
   push:
     branches-ignore:
+      - main
       - 'release/**'
       - 'ci-enable/**'
 
