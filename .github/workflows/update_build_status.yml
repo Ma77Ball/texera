@@ -75,6 +75,113 @@ jobs:
                   console.log('  ' + checkRuns.data.check_runs.length + ' total check_runs on ' + pr.head.sha.substring(0, 8) + '; Build checks: ' +
                     checkRuns.data.check_runs.filter(c => c.name === 'Build').map(c => c.id + '(' + c.status + '/' + c.conclusion + ')').join(', ') || '(none)')
 
+                  // Mirror each fork CI job as its own "Build / <job>" check on
+                  // the PR's head SHA. Mirrors the same logic in
+                  // notify_test_workflow.yml's ensureJobMirrors so jobs that
+                  // didn't exist when the PR opened still get surfaced as soon
+                  // as they appear in the fork run. Informational only — only
+                  // the rolled-up "Build" check is in .asf.yaml's required list.
+                  async function ensureJobMirrors(run, forkOwner, forkRepo, headSha) {
+                    let jobs
+                    try {
+                      const resp = await github.request(
+                        'GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs',
+                        { owner: forkOwner, repo: forkRepo, run_id: run.id, per_page: 100 }
+                      )
+                      jobs = resp.data.jobs
+                    } catch (error) {
+                      console.error('    ensureJobMirrors: failed to fetch fork run jobs: ' + error.message)
+                      return
+                    }
+                    if (jobs.length === 0) return
+
+                    let existingChildren = []
+                    try {
+                      existingChildren = await github.paginate(github.rest.checks.listForRef, {
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        ref: headSha,
+                        per_page: 100,
+                      })
+                    } catch (error) {
+                      console.error('    ensureJobMirrors: failed to list existing checks: ' + error.message)
+                    }
+                    const existingByName = new Map()
+                    for (const c of existingChildren) {
+                      if (!c.name.startsWith('Build / ')) continue
+                      const prev = existingByName.get(c.name)
+                      if (!prev || prev.id < c.id) existingByName.set(c.name, c)
+                    }
+
+                    let mirrored = 0
+                    for (const job of jobs) {
+                      const checkName = 'Build / ' + job.name
+                      const stateLabel = job.status === 'completed'
+                        ? job.status + ' / ' + job.conclusion
+                        : job.status
+                      const fields = {
+                        external_id: String(job.id),
+                        details_url: job.html_url,
+                        output: {
+                          title: 'Fork CI: ' + job.name + ' (' + stateLabel + ')',
+                          summary:
+                            ':link: **[View `' + job.name + '` logs on `' + forkOwner + '/' + forkRepo + '`](' + job.html_url + ')**\n' +
+                            '\n' +
+                            'Mirrors the `' + job.name + '` job from fork CI run [#' + run.id + '](https://github.com/' + forkOwner + '/' + forkRepo + '/actions/runs/' + run.id + ') for commit `' + headSha.substring(0, 8) + '`.\n',
+                          text: JSON.stringify({
+                            owner: forkOwner,
+                            repo: forkRepo,
+                            job_id: job.id,
+                            run_id: run.id,
+                          }),
+                        },
+                      }
+                      fields.status = job.status === 'completed'
+                        ? 'completed'
+                        : (job.status === 'queued' ? 'queued' : 'in_progress')
+                      if (job.status === 'completed') {
+                        fields.conclusion = job.conclusion
+                        if (job.started_at) fields.started_at = job.started_at
+                        if (job.completed_at) fields.completed_at = job.completed_at
+                      } else if (job.status === 'in_progress' && job.started_at) {
+                        fields.started_at = job.started_at
+                      }
+
+                      const existing = existingByName.get(checkName)
+                      // Skip redundant PATCHes when both terminal and matching.
+                      if (existing &&
+                          existing.status === 'completed' &&
+                          fields.status === 'completed' &&
+                          existing.conclusion === fields.conclusion) {
+                        continue
+                      }
+                      try {
+                        if (existing) {
+                          await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            check_run_id: existing.id,
+                            ...fields,
+                          })
+                        } else {
+                          await github.rest.checks.create({
+                            owner: context.repo.owner,
+                            repo: context.repo.repo,
+                            name: checkName,
+                            head_sha: headSha,
+                            ...fields,
+                          })
+                        }
+                        mirrored++
+                      } catch (error) {
+                        console.error('    mirror "' + checkName + '" FAILED: ' + error.status + ' ' + error.message)
+                      }
+                    }
+                    if (mirrored > 0) {
+                      console.log('    ensureJobMirrors: ' + mirrored + '/' + jobs.length + ' Build/* checks updated')
+                    }
+                  }
+
                   // Helper: build the standard Build-check output object.
                   // Keeps title/summary in sync with notify_test_workflow.yml's
                   // detection-success path so the rendering is consistent
@@ -155,6 +262,8 @@ jobs:
                           console.error('  -> PATCH (recovery) FAILED: ' + error.status + ' ' + error.message)
                           console.error('     payload: ' + JSON.stringify(patch))
                         }
+                        // Also mirror the run's individual jobs as Build/* checks.
+                        await ensureJobMirrors(wr, pr.head.repo.owner.login, pr.head.repo.name, pr.head.sha)
                       } catch (error) {
                         console.error('  -> recovery error: ' + error.message)
                       }
@@ -214,6 +323,15 @@ jobs:
                     } catch (error) {
                       console.error('  -> PATCH (sync) FAILED: ' + error.status + ' ' + error.message)
                       console.error('     payload: ' + JSON.stringify(patch))
+                    }
+                    // Also mirror the run's individual jobs as Build/* checks.
+                    // run.data.repository.full_name is "owner/repo" — split it.
+                    {
+                      const fullName = run.data.repository ? run.data.repository.full_name : (runRef.owner + '/' + runRef.repo)
+                      const slash = fullName.indexOf('/')
+                      const forkOwner = slash >= 0 ? fullName.substring(0, slash) : runRef.owner
+                      const forkRepo = slash >= 0 ? fullName.substring(slash + 1) : runRef.repo
+                      await ensureJobMirrors(run.data, forkOwner, forkRepo, pr.head.sha)
                     }
 
                     break
