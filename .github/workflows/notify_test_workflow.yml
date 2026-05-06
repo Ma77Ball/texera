@@ -195,11 +195,21 @@ jobs:
                   text: runRefStr,
                 },
               }
+              // Map the fork run's actual status onto the Build check so the
+              // PR icon matches what the fork is doing:
+              //   run completed   → completed / <conclusion>   (green/red/etc.)
+              //   run in_progress → in_progress + started_at   (yellow spinner)
+              //   run queued      → queued                     (gray)
+              // started_at is REQUIRED for in_progress to render as a spinner —
+              // without it the check sometimes shows as "passed" instead.
               if (run.status === 'completed') {
                 patch.status = 'completed'
                 patch.conclusion = run.conclusion
                 if (run.run_started_at) patch.started_at = run.run_started_at
                 if (run.updated_at) patch.completed_at = run.updated_at
+              } else if (run.status === 'in_progress') {
+                patch.status = 'in_progress'
+                patch.started_at = run.run_started_at || new Date().toISOString()
               } else {
                 patch.status = 'queued'
               }
