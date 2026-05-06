@@ -157,6 +157,8 @@ jobs:
                   ? 'The fork run has already finished — the result above is final.'
                   : 'It will advance to `in_progress` and then `completed` automatically as the fork run progresses, via the `update_build_status.yml` workflow that polls every 5 minutes.') + '\n' +
                 '\n' +
+                'Each individual fork CI job (frontend, amber, python, etc.) is also surfaced on this PR as its own `Build / <job>` check — open the **Checks** tab to drill in.\n' +
+                '\n' +
                 '| Field | Value |\n' +
                 '|---|---|\n' +
                 '| Fork repo | `' + headRepo + '` |\n' +
@@ -183,6 +185,109 @@ jobs:
                 patch.status = 'queued'
               }
               await patchBuildCheck(patch)
+
+              // Mirror each fork CI job as its own "Build / <job>" check on the PR.
+              await ensureJobMirrors(run, pr.head.repo.owner.login, pr.head.repo.name)
+            }
+
+            // For each job in the fork run, create or update a check_run named
+            // "Build / <job_name>" on the PR's head SHA. These are informational
+            // (NOT in .asf.yaml's required list) — only the rolled-up "Build"
+            // gates merging. Called by linkCheck (notify path) and also by
+            // update_build_status.yml every 5 minutes via the same logic, so
+            // jobs that didn't exist when the PR opened still get mirrored.
+            async function ensureJobMirrors(run, forkOwner, forkRepo) {
+              let jobs
+              try {
+                const resp = await github.request(
+                  'GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs',
+                  { owner: forkOwner, repo: forkRepo, run_id: run.id, per_page: 100 }
+                )
+                jobs = resp.data.jobs
+              } catch (error) {
+                console.error('  ensureJobMirrors: failed to fetch fork run jobs: ' + error.message)
+                return
+              }
+              console.log('  ensureJobMirrors: fork run #' + run.id + ' has ' + jobs.length + ' jobs')
+              if (jobs.length === 0) return
+
+              // Index existing Build/* checks on this SHA so we can PATCH instead
+              // of duplicating on synchronize / re-runs of this workflow.
+              let existingChildren = []
+              try {
+                existingChildren = await github.paginate(github.rest.checks.listForRef, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: head_sha,
+                  per_page: 100,
+                })
+              } catch (error) {
+                console.error('  ensureJobMirrors: failed to list existing checks: ' + error.message)
+              }
+              const existingByName = new Map()
+              for (const c of existingChildren) {
+                if (!c.name.startsWith('Build / ')) continue
+                const prev = existingByName.get(c.name)
+                if (!prev || prev.id < c.id) existingByName.set(c.name, c)
+              }
+
+              for (const job of jobs) {
+                const checkName = 'Build / ' + job.name
+                const stateLabel = job.status === 'completed'
+                  ? job.status + ' / ' + job.conclusion
+                  : job.status
+                const fields = {
+                  external_id: String(job.id),
+                  details_url: job.html_url,
+                  output: {
+                    title: 'Fork CI: ' + job.name + ' (' + stateLabel + ')',
+                    summary:
+                      ':link: **[View `' + job.name + '` logs on `' + forkOwner + '/' + forkRepo + '`](' + job.html_url + ')**\n' +
+                      '\n' +
+                      'Mirrors the `' + job.name + '` job from fork CI run [#' + run.id + '](https://github.com/' + forkOwner + '/' + forkRepo + '/actions/runs/' + run.id + ') for commit `' + head_sha.substring(0, 8) + '`. Status / conclusion track the fork job and update every ~5 minutes via `update_build_status.yml`.\n',
+                    text: JSON.stringify({
+                      owner: forkOwner,
+                      repo: forkRepo,
+                      job_id: job.id,
+                      run_id: run.id,
+                    }),
+                  },
+                }
+                fields.status = job.status === 'completed'
+                  ? 'completed'
+                  : (job.status === 'queued' ? 'queued' : 'in_progress')
+                if (job.status === 'completed') {
+                  fields.conclusion = job.conclusion
+                  if (job.started_at) fields.started_at = job.started_at
+                  if (job.completed_at) fields.completed_at = job.completed_at
+                } else if (job.status === 'in_progress' && job.started_at) {
+                  fields.started_at = job.started_at
+                }
+
+                const existing = existingByName.get(checkName)
+                try {
+                  if (existing) {
+                    await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      check_run_id: existing.id,
+                      ...fields,
+                    })
+                    console.log('    PATCH "' + checkName + '" (' + existing.id + '): ' + fields.status + (fields.conclusion ? '/' + fields.conclusion : ''))
+                  } else {
+                    const created = await github.rest.checks.create({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      name: checkName,
+                      head_sha: head_sha,
+                      ...fields,
+                    })
+                    console.log('    CREATE "' + checkName + '" (' + created.data.id + '): ' + fields.status + (fields.conclusion ? '/' + fields.conclusion : ''))
+                  }
+                } catch (error) {
+                  console.error('    FAILED to mirror "' + checkName + '": ' + error.status + ' ' + error.message)
+                }
+              }
             }
 
             // ----- scenario 1: fork repo gone ----------------------------------
