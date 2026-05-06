@@ -464,7 +464,6 @@ jobs:
                 'See the PR conversation for the full troubleshooting checklist.\n',
                 forkActionsUrl
               )
-              )
               return
             }
 
