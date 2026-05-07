@@ -17,11 +17,15 @@
 name: Release Auditing
 
 on:
+  # PR-side runs are owned by Fork CI: fork-ci.yml runs the same
+  # apache/skywalking-eyes license-header check in the contributor's fork
+  # and surfaces the result on the PR via the `Build` commit status. Adding
+  # `pull_request:` here would queue a duplicate workflow that requires
+  # first-time-contributor approval on every fork PR.
   push:
     branches:
       - 'ci-enable/**'
       - 'main'
-  pull_request:
   workflow_dispatch:
 
 jobs:
