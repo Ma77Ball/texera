@@ -15,16 +15,17 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Fork CI — Apache Spark model (step 1 of 3)
+# Fork CI — Apache Spark model
 #
-# Runs the full build matrix in the contributor's fork on every branch push.
-# notify-fork-ci.yml detects this run when a PR is opened and creates a
-# "Fork CI" check on the PR. sync-fork-ci-status.yml polls this run every
-# 15 minutes and keeps the check current until the run completes.
+# Runs the full PR-gating suite in the contributor's fork on every branch
+# push. Mirrors what required-checks.yml runs in apache/texera on a
+# ci-enable/** push: build matrix + license headers, aggregated into a
+# single "fork-ci" result that notify_test_workflow.yml surfaces on the PR
+# as the "Build" commit status.
 #
 # This workflow is a no-op in the canonical apache/texera repository —
-# the job guard (github.repository_owner != 'apache') ensures it never
-# consumes main-repo runner quota.
+# every job is guarded by (github.repository_owner != 'apache') so it
+# never consumes main-repo runner quota.
 #
 # Secrets (CODECOV_TOKEN, NX_CLOUD_ACCESS_TOKEN) are unavailable in forks
 # and degrade gracefully: Codecov uploads are skipped (fail_ci_if_error:
@@ -58,3 +59,41 @@ jobs:
       run_python: true
       run_agent_service: true
     secrets: inherit
+
+  check-headers:
+    name: Check License Headers
+    if: github.repository_owner != 'apache'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: apache/skywalking-eyes@5c5b974209f0de5d905f37deb69369068ebfc15c # v0.7.0
+
+  fork-ci:
+    # Aggregator job — its conclusion is what notify_test_workflow.yml
+    # mirrors as the PR's "Build" status. Mirrors required-checks.yml's
+    # final required-checks job. Runs even if upstream jobs failed so the
+    # aggregate result is always reported.
+    name: Fork CI
+    needs: [build, check-headers]
+    if: always() && github.repository_owner != 'apache'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all fork CI jobs succeeded or were skipped
+        run: |
+          declare -A results=(
+            [build]="${{ needs.build.result }}"
+            [check-headers]="${{ needs.check-headers.result }}"
+          )
+          failed=0
+          for job in "${!results[@]}"; do
+            r="${results[$job]}"
+            echo "${job}: ${r}"
+            if [[ "$r" != "success" && "$r" != "skipped" ]]; then
+              failed=1
+            fi
+          done
+          if (( failed )); then
+            echo "::error::One or more fork CI jobs did not succeed."
+            exit 1
+          fi
+          echo "All fork CI jobs succeeded or were skipped."
