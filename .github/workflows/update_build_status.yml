@@ -20,51 +20,46 @@
 name: Update build status workflow
 
 on:
-  schedule:
-    # Every 5 minutes (the GitHub Actions minimum). Fork CI completion isn't
-    # observable via workflow_run from the fork (the run lives in a different
-    # repo), so a periodic poll is the only general-purpose mechanism to push
-    # the fork run's final state onto the PR's Build commit status.
-    - cron: "*/5 * * * *"
   # Fires immediately after notify_test_workflow.yml finishes for any PR
-  # event. Guarantees at least one sync run per PR open/synchronize without
-  # waiting for the next cron tick — important because GitHub's scheduled
-  # workflows can be delayed by an hour or more after first being added.
+  # event. This is the PRIMARY trigger — it long-polls the fork until the
+  # fork CI run completes (or 60 min timeout), so the Build status updates
+  # within ~30s of state changes without waiting on cron.
   workflow_run:
     workflows: ["On pull request update"]
     types: [completed]
-  # Manual button on the Actions tab for ad-hoc forced syncs (testing,
-  # debugging, recovering from a missed cron tick).
+  schedule:
+    # Cron safety net — every 5 min (GitHub minimum). Catches PRs whose
+    # workflow_run-triggered long-poll was killed mid-flight (timeout, cancel,
+    # runner crash) or whose fork CI completed during a gap. Cron does ONE
+    # pass per tick (no long-polling) — fast and cheap.
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 jobs:
   update:
     name: Update build status
     runs-on: ubuntu-latest
+    # workflow_run mode polls up to 60 min waiting for fork CI completion.
+    # Other modes (cron, workflow_dispatch) finish in seconds.
+    timeout-minutes: 65
     permissions:
       actions: read
       statuses: write
     steps:
       - name: "Update build status"
         uses: actions/github-script@v8
+        env:
+          TRIGGER_EVENT: ${{ github.event_name }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            console.log('=== update_build_status: ' + new Date().toISOString() + ' ===')
+            const isLongPoll = process.env.TRIGGER_EVENT === 'workflow_run'
+            const maxIterations = isLongPoll ? 120 : 1   // 120 * 30s = 60 min
+            const sleepMs = 30000
             const statusContext = 'Build'
 
-            // Stateless re-detection: for every open PR with an accessible
-            // fork, ask the fork for its most recent fork-ci.yml run on the
-            // PR's head branch, find the one matching head_sha, then write
-            // a Build commit status mirroring that run's state. No state
-            // is carried between ticks — if the run doesn't exist yet, we
-            // leave the existing status alone and try again next tick.
-            const prsIter = github.paginate.iterator(
-              'GET /repos/{owner}/{repo}/pulls',
-              { owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100 }
-            )
-            let prCount = 0
-            let updateCount = 0
+            console.log('=== update_build_status: ' + new Date().toISOString() + ' ===')
+            console.log('trigger=' + process.env.TRIGGER_EVENT + ' mode=' + (isLongPoll ? 'long-poll up to ' + maxIterations + ' iters' : 'single pass'))
 
             // Map fork run state -> commit status state.
             function runToStatusState(run) {
@@ -74,9 +69,9 @@ jobs:
               return 'failure'
             }
 
-            // Find the most recent Build status for a SHA. The /statuses/{sha}
-            // endpoint returns statuses in reverse chronological order; the
-            // first one matching our context is the current state.
+            // Find the most recent Build status for a SHA. /statuses/{sha}
+            // returns statuses in reverse chronological order; the first
+            // matching context is current.
             async function getCurrentBuildStatus(sha) {
               try {
                 const resp = await github.request('GET /repos/{owner}/{repo}/commits/{ref}/statuses', {
@@ -92,98 +87,110 @@ jobs:
               }
             }
 
-            for await (const prs of prsIter) {
-              for (const pr of prs.data) {
-                prCount++
-                console.log('PR #' + pr.number + ' (' + pr.head.sha.substring(0, 8) + ', mergeable_state=' + pr.mergeable_state + ')')
+            // One pass over all open PRs. Returns { pendingCount, updateCount }
+            // — pendingCount is how many PRs are still in non-terminal state
+            // (used by the long-poll loop to decide whether to keep going).
+            async function syncOnce() {
+              const prsIter = github.paginate.iterator(
+                'GET /repos/{owner}/{repo}/pulls',
+                { owner: context.repo.owner, repo: context.repo.repo, state: 'open', per_page: 100 }
+              )
+              let prCount = 0
+              let updateCount = 0
+              let pendingCount = 0
 
-                if (!pr.head.repo) {
-                  console.log('  head repo null; skipping')
-                  continue
-                }
-                // In-tree PRs have no fork CI to mirror — notify_test_workflow
-                // already auto-passes them on open. Don't touch their status.
-                if (pr.head.repo.full_name === context.repo.owner + '/' + context.repo.repo) {
-                  console.log('  in-tree PR (head repo == base repo); skipping')
-                  continue
-                }
+              for await (const prs of prsIter) {
+                for (const pr of prs.data) {
+                  prCount++
+                  if (!pr.head.repo) continue
+                  if (pr.head.repo.full_name === context.repo.owner + '/' + context.repo.repo) continue
 
-                const current = await getCurrentBuildStatus(pr.head.sha)
-                if (current) {
-                  console.log('  current Build status: state=' + current.state + ' target_url=' + current.target_url)
-                  // Don't fight notify_test_workflow's scenario decisions:
-                  // if the latest Build status is a terminal failure with
-                  // a non-fork target_url (blocked branch / fork inaccessible),
-                  // it was set deliberately and shouldn't be overwritten by
-                  // re-detection.
-                  const isForkTarget = current.target_url && current.target_url.includes('/' + pr.head.repo.full_name + '/actions/runs/')
-                  if (current.state === 'failure' && !isForkTarget) {
-                    console.log('  -> non-fork failure target; leaving notify-set status alone')
+                  const current = await getCurrentBuildStatus(pr.head.sha)
+                  // Don't fight notify's deliberate non-fork failure decisions
+                  // (blocked branch, fork inaccessible). target_url for those
+                  // points at the PR or notify run — never at the fork run.
+                  if (current && current.state === 'failure') {
+                    const isForkTarget = current.target_url && current.target_url.includes('/' + pr.head.repo.full_name + '/actions/runs/')
+                    if (!isForkTarget) continue
+                  }
+                  if (current && current.state === 'success') {
+                    const isForkTarget = current.target_url && current.target_url.includes('/' + pr.head.repo.full_name + '/actions/runs/')
+                    if (isForkTarget) continue
+                  }
+
+                  let runs
+                  try {
+                    runs = await github.request(
+                      'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
+                      {
+                        owner: pr.head.repo.owner.login,
+                        repo: pr.head.repo.name,
+                        workflow_id: 'fork-ci.yml',
+                        branch: pr.head.ref,
+                        per_page: 10,
+                      }
+                    )
+                  } catch (error) {
+                    console.log('  PR #' + pr.number + ': fork API error ' + error.message)
+                    pendingCount++
                     continue
                   }
-                  // Already terminal-success and pointing at the fork run —
-                  // nothing to do.
-                  if (current.state === 'success' && isForkTarget) {
-                    console.log('  -> already success and linked; nothing to do')
+
+                  const matching = runs.data.workflow_runs.find(r => r.head_sha === pr.head.sha)
+                  if (!matching) {
+                    pendingCount++
                     continue
                   }
-                }
 
-                let runs
-                try {
-                  runs = await github.request(
-                    'GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs',
-                    {
-                      owner: pr.head.repo.owner.login,
-                      repo: pr.head.repo.name,
-                      workflow_id: 'fork-ci.yml',
-                      branch: pr.head.ref,
-                      per_page: 10,
-                    }
-                  )
-                } catch (error) {
-                  console.log('  -> fork runs API error: ' + error.message + '; skipping')
-                  continue
-                }
+                  const actions_url = 'https://github.com/' + pr.head.repo.full_name + '/actions/runs/' + matching.id
+                  const newState = runToStatusState(matching)
+                  const description = matching.status === 'completed'
+                    ? 'Fork CI run #' + matching.id + ' ' + matching.conclusion
+                    : 'Fork CI run #' + matching.id + ' ' + matching.status
 
-                const matching = runs.data.workflow_runs.find(r => r.head_sha === pr.head.sha)
-                if (!matching) {
-                  console.log('  -> no fork run matches ' + pr.head.sha + ' yet; leaving status as-is')
-                  continue
-                }
+                  if (newState === 'pending') pendingCount++
 
-                const actions_url = 'https://github.com/' + pr.head.repo.full_name + '/actions/runs/' + matching.id
-                const newState = runToStatusState(matching)
-                const description = matching.status === 'completed'
-                  ? 'Fork CI run #' + matching.id + ' ' + matching.conclusion
-                  : 'Fork CI run #' + matching.id + ' ' + matching.status
+                  // Idempotency: only POST if state, target_url, or description
+                  // actually changed. Avoids history spam.
+                  if (current
+                      && current.state === newState
+                      && current.target_url === actions_url
+                      && current.description === description.slice(0, 140)) {
+                    continue
+                  }
 
-                // Idempotency guard — only POST if state, target_url, or
-                // description actually changed. Avoids spamming the status
-                // history with no-op updates every 5 minutes.
-                if (current
-                    && current.state === newState
-                    && current.target_url === actions_url
-                    && current.description === description) {
-                  console.log('  -> already in sync (state=' + newState + '); nothing to do')
-                  continue
-                }
-
-                try {
-                  await github.rest.repos.createCommitStatus({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    sha: pr.head.sha,
-                    state: newState,
-                    context: statusContext,
-                    description: description.slice(0, 140),
-                    target_url: actions_url,
-                  })
-                  updateCount++
-                  console.log('  -> synced: state=' + newState + ' target=' + actions_url)
-                } catch (error) {
-                  console.error('  -> POST status FAILED: ' + (error.status || '?') + ' ' + error.message)
+                  try {
+                    await github.rest.repos.createCommitStatus({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      sha: pr.head.sha,
+                      state: newState,
+                      context: statusContext,
+                      description: description.slice(0, 140),
+                      target_url: actions_url,
+                    })
+                    updateCount++
+                    console.log('  PR #' + pr.number + ' (' + pr.head.sha.substring(0, 8) + '): synced state=' + newState + ' target=' + actions_url)
+                  } catch (error) {
+                    console.error('  PR #' + pr.number + ': POST status FAILED ' + (error.status || '?') + ' ' + error.message)
+                  }
                 }
               }
+              return { prCount, updateCount, pendingCount }
             }
-            console.log('=== done: ' + prCount + ' PRs scanned, ' + updateCount + ' Build statuses updated ===')
+
+            for (let iter = 0; iter < maxIterations; iter++) {
+              if (iter > 0) {
+                console.log('--- iter ' + (iter + 1) + '/' + maxIterations + ' (sleeping ' + (sleepMs / 1000) + 's) ---')
+                await new Promise(r => setTimeout(r, sleepMs))
+              } else {
+                console.log('--- iter 1/' + maxIterations + ' ---')
+              }
+              const { prCount, updateCount, pendingCount } = await syncOnce()
+              console.log('  scanned=' + prCount + ' updated=' + updateCount + ' pending=' + pendingCount)
+              if (pendingCount === 0) {
+                console.log('All PRs resolved; exiting after ' + (iter + 1) + ' iter(s)')
+                break
+              }
+            }
+            console.log('=== done ===')
