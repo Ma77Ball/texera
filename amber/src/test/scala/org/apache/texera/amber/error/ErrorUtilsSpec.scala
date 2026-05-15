@@ -19,6 +19,7 @@
 
 package org.apache.texera.amber.error
 
+import org.apache.texera.amber.core.tuple.{Attribute, AttributeType, Schema, Tuple}
 import org.apache.texera.amber.core.virtualidentity.ActorVirtualIdentity
 import org.apache.texera.amber.engine.architecture.rpc.controlcommands.ConsoleMessageType.ERROR
 import org.apache.texera.amber.engine.architecture.rpc.controlreturns.{ControlError, ErrorLanguage}
@@ -79,6 +80,92 @@ class ErrorUtilsSpec extends AnyFlatSpec with Matchers {
     val msg = ErrorUtils.mkConsoleMessage(ActorVirtualIdentity("worker-A"), err)
     msg.source shouldBe "(Foo.scala:42)"
     msg.message should include("Foo.scala")
+  }
+
+  // ----- mkBreakpointFault -----
+
+  "mkBreakpointFault" should "render a Tuple as a BreakpointTuple with stringified fields" in {
+    val schema = Schema()
+      .add(new Attribute("name", AttributeType.STRING))
+      .add(new Attribute("age", AttributeType.INTEGER))
+    val tuple = Tuple
+      .builder(schema)
+      .addSequentially(Array[Any]("ada", Integer.valueOf(42)))
+      .build()
+    val fault = ErrorUtils.mkBreakpointFault(
+      ActorVirtualIdentity("Worker:WF1-E1-filter-main-0"),
+      tuple,
+      isInput = true
+    )
+    fault.workerName shouldBe "Worker:WF1-E1-filter-main-0"
+    fault.faultedTuple.isDefined shouldBe true
+    val bt = fault.faultedTuple.get
+    bt.isInput shouldBe true
+    bt.tuple shouldBe Seq("ada", "42")
+  }
+
+  it should "set isInput=false when the failure happens on output" in {
+    val schema = Schema().add(new Attribute("v", AttributeType.STRING))
+    val tuple = Tuple.builder(schema).addSequentially(Array[Any]("x")).build()
+    val fault = ErrorUtils.mkBreakpointFault(
+      ActorVirtualIdentity("worker-B"),
+      tuple,
+      isInput = false
+    )
+    fault.faultedTuple.get.isInput shouldBe false
+  }
+
+  it should "render null field values as the literal string \"null\"" in {
+    // Defensive: a null in a tuple field must not crash mkBreakpointFault and
+    // must produce a stable rendering, since the frontend always needs
+    // something to show next to the exception.
+    val schema = Schema().add(new Attribute("optional", AttributeType.STRING))
+    val tuple = Tuple.builder(schema).addSequentially(Array[Any](null)).build()
+    val fault = ErrorUtils.mkBreakpointFault(
+      ActorVirtualIdentity("worker-C"),
+      tuple,
+      isInput = true
+    )
+    fault.faultedTuple.get.tuple shouldBe Seq("null")
+  }
+
+  // ----- mkBreakpointFaultRequest -----
+
+  "mkBreakpointFaultRequest" should "share rendering with mkBreakpointFault" in {
+    // Pin: both helpers must emit identical field strings, since the
+    // controller relays the request fields onward as a BreakpointFault.
+    val schema = Schema()
+      .add(new Attribute("name", AttributeType.STRING))
+      .add(new Attribute("age", AttributeType.INTEGER))
+    val tuple = Tuple
+      .builder(schema)
+      .addSequentially(Array[Any]("ada", Integer.valueOf(42)))
+      .build()
+    val req = ErrorUtils.mkBreakpointFaultRequest(
+      ActorVirtualIdentity("worker-A"),
+      tuple,
+      isInput = true
+    )
+    val fault = ErrorUtils.mkBreakpointFault(
+      ActorVirtualIdentity("worker-A"),
+      tuple,
+      isInput = true
+    )
+    req.workerName shouldBe "worker-A"
+    req.tupleId shouldBe 0L
+    req.isInput shouldBe true
+    req.tuple shouldBe fault.faultedTuple.get.tuple
+  }
+
+  it should "carry isInput=false through to the request" in {
+    val schema = Schema().add(new Attribute("v", AttributeType.STRING))
+    val tuple = Tuple.builder(schema).addSequentially(Array[Any]("x")).build()
+    val req = ErrorUtils.mkBreakpointFaultRequest(
+      ActorVirtualIdentity("worker-B"),
+      tuple,
+      isInput = false
+    )
+    req.isInput shouldBe false
   }
 
   // ----- mkControlError -----

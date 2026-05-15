@@ -34,6 +34,7 @@ option (scalapb.options) = {
 
 
 message BreakpointFault{
+  option (scalapb.message).extends = "org.apache.texera.amber.engine.architecture.controller.ClientEvent";
   message BreakpointTuple{
     int64 id = 1;
     bool is_input = 2;

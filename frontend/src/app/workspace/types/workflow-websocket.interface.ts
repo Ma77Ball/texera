@@ -243,7 +243,24 @@ export type TexeraWebsocketEventTypeMap = {
   ClusterStatusUpdateEvent: ClusterStatusUpdateEvent;
   RegionUpdateEvent: RegionUpdateEvent;
   RegionStateEvent: RegionStateEvent;
+  BreakpointFaultEvent: BreakpointFaultEvent;
 };
+
+export interface BreakpointFaultTuple {
+  readonly id: number;
+  readonly isInput: boolean;
+  readonly tuple: ReadonlyArray<string>;
+}
+
+export interface BreakpointFault {
+  readonly workerName: string;
+  readonly faultedTuple?: BreakpointFaultTuple;
+}
+
+export interface BreakpointFaultEvent {
+  readonly operatorId: string;
+  readonly newFaults: ReadonlyArray<BreakpointFault>;
+}
 
 // helper type definitions to generate the request and event types
 type ValueOf<T> = T[keyof T];

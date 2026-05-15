@@ -102,6 +102,7 @@ class WorkflowExecutionService(
   var executionStatsService: ExecutionStatsService = _
   var executionRuntimeService: ExecutionRuntimeService = _
   var executionConsoleService: ExecutionConsoleService = _
+  var executionBreakpointService: ExecutionBreakpointService = _
 
   def executeWorkflow(): Unit = {
     try {
@@ -134,6 +135,8 @@ class WorkflowExecutionService(
     )
     executionConsoleService =
       new ExecutionConsoleService(client, executionStateStore, wsInput, workflow.context)
+    executionBreakpointService =
+      new ExecutionBreakpointService(client, executionStateStore, wsInput)
 
     logger.info("Starting the workflow execution.")
     resultService.attachToExecution(
@@ -174,6 +177,7 @@ class WorkflowExecutionService(
       executionConsoleService.unsubscribeAll()
       executionStatsService.unsubscribeAll()
       executionReconfigurationService.unsubscribeAll()
+      executionBreakpointService.unsubscribeAll()
     }
 
   }

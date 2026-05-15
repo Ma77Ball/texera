@@ -51,7 +51,7 @@ trait EndChannelHandler {
     } catch safely {
       case e =>
         // forward input tuple to the user and pause DP thread
-        dp.handleExecutorException(e)
+        dp.handleExecutorException(e, None)
     }
 
     dp.outputManager.outputIterator.appendSpecialTupleToEnd(

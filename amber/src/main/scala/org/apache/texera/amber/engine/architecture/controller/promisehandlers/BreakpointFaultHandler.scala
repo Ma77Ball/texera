@@ -17,37 +17,39 @@
  * under the License.
  */
 
-package org.apache.texera.amber.engine.architecture.worker.promisehandlers
+package org.apache.texera.amber.engine.architecture.controller.promisehandlers
 
 import com.twitter.util.Future
-import org.apache.texera.amber.engine.architecture.rpc.controlcommands.EmbeddedControlMessageType.NO_ALIGNMENT
+import org.apache.texera.amber.engine.architecture.controller.ControllerAsyncRPCHandlerInitializer
 import org.apache.texera.amber.engine.architecture.rpc.controlcommands.{
   AsyncRPCContext,
-  EmptyRequest
+  BreakpointFaultTriggeredRequest
 }
 import org.apache.texera.amber.engine.architecture.rpc.controlreturns.EmptyReturn
-import org.apache.texera.amber.engine.architecture.rpc.workerservice.WorkerServiceGrpc.METHOD_START_CHANNEL
-import org.apache.texera.amber.engine.architecture.worker.DataProcessorRPCHandlerInitializer
-import org.apache.texera.amber.error.ErrorUtils.safely
+import org.apache.texera.amber.engine.common.executionruntimestate.BreakpointFault
 
-trait StartChannelHandler {
-  this: DataProcessorRPCHandlerInitializer =>
+trait BreakpointFaultHandler {
+  this: ControllerAsyncRPCHandlerInitializer =>
 
-  override def startChannel(
-      request: EmptyRequest,
+  override def breakpointFaultTriggered(
+      msg: BreakpointFaultTriggeredRequest,
       ctx: AsyncRPCContext
   ): Future[EmptyReturn] = {
-    val portId = dp.inputGateway.getChannel(dp.inputManager.currentChannelId).getPortId
-    dp.sendECMToDataChannels(METHOD_START_CHANNEL, NO_ALIGNMENT)
-    try {
-      val outputState = dp.executor.produceStateOnStart(portId.id)
-      if (outputState.isDefined) {
-        dp.outputManager.emitState(outputState.get)
-      }
-    } catch safely {
-      case e =>
-        dp.handleExecutorException(e, None)
-    }
+    // Rebuild the domain BreakpointFault from the wire request so the web
+    // layer's BreakpointFault callback can pick it up exactly like the
+    // ConsoleMessage relay does. The two protos carry the same fields by
+    // design; the duplication exists only to avoid a circular proto import.
+    val fault = BreakpointFault(
+      workerName = msg.workerName,
+      faultedTuple = Some(
+        BreakpointFault.BreakpointTuple(
+          id = msg.tupleId,
+          isInput = msg.isInput,
+          tuple = msg.tuple
+        )
+      )
+    )
+    sendToClient(fault)
     EmptyReturn()
   }
 }

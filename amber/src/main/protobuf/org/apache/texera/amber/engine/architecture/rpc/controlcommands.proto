@@ -46,6 +46,7 @@ message ControlRequest {
     LinkWorkersRequest linkWorkersRequest = 9;
     WorkflowReconfigureRequest workflowReconfigureRequest = 10;
     JumpToOperatorRegionRequest jumpToOperatorRegionRequest = 11;
+    BreakpointFaultTriggeredRequest breakpointFaultTriggeredRequest = 12;
 
     // request for worker
     AddInputChannelRequest addInputChannelRequest = 50;
@@ -157,6 +158,21 @@ message ConsoleMessage {
 
 message ConsoleMessageTriggeredRequest {
   ConsoleMessage consoleMessage = 1 [(scalapb.field).no_box = true];
+}
+
+// Sent by a worker to the controller when an operator throws on a tuple.
+// The controller-side handler converts this into a BreakpointFault and
+// writes it into ExecutionStateStore.breakpointStore so the frontend can
+// render the failing tuple in the debugger panel.
+//
+// The shape mirrors engine.common.BreakpointFault deliberately; importing
+// that type would create a circular proto import, so we copy the fields
+// here and let the handler bridge the two.
+message BreakpointFaultTriggeredRequest {
+  string worker_name = 1;
+  int64 tuple_id = 2;
+  bool is_input = 3;
+  repeated string tuple = 4;
 }
 
 message PortCompletedRequest {

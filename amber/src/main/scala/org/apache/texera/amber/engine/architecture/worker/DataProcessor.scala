@@ -58,7 +58,11 @@ import org.apache.texera.amber.engine.architecture.worker.statistics.WorkerStati
 import org.apache.texera.amber.engine.common.ambermessage._
 import org.apache.texera.amber.engine.common.statetransition.WorkerStateManager
 import org.apache.texera.amber.engine.common.virtualidentity.util.CONTROLLER
-import org.apache.texera.amber.error.ErrorUtils.{mkConsoleMessage, safely}
+import org.apache.texera.amber.error.ErrorUtils.{
+  mkBreakpointFaultRequest,
+  mkConsoleMessage,
+  safely
+}
 
 import java.util.concurrent.LinkedBlockingQueue
 
@@ -117,7 +121,7 @@ class DataProcessor(
     } catch safely {
       case e =>
         // forward input tuple to the user and pause DP thread
-        handleExecutorException(e)
+        handleExecutorException(e, Some(tuple))
     }
   }
 
@@ -129,7 +133,7 @@ class DataProcessor(
       }
     } catch safely {
       case e =>
-        handleExecutorException(e)
+        handleExecutorException(e, None)
     }
   }
 
@@ -148,7 +152,7 @@ class DataProcessor(
         // also invalidate outputIterator
         outputManager.outputIterator.setTupleOutput(Iterator.empty)
         // forward input tuple to the user and pause DP thread
-        handleExecutorException(e)
+        handleExecutorException(e, None)
     }
     if (out == null) return
 
@@ -299,11 +303,20 @@ class DataProcessor(
       }
   }
 
-  def handleExecutorException(e: Throwable): Unit = {
+  def handleExecutorException(e: Throwable, failingTuple: Option[Tuple]): Unit = {
     asyncRPCClient.controllerInterface.consoleMessageTriggered(
       ConsoleMessageTriggeredRequest(mkConsoleMessage(actorId, e)),
       asyncRPCClient.mkContext(CONTROLLER)
     )
+    // Surface the failing tuple to the controller's breakpointStore when one
+    // is available (input-tuple processing). Output-iterator and state-message
+    // failures do not have a tuple in scope and skip this step.
+    failingTuple.foreach { t =>
+      asyncRPCClient.controllerInterface.breakpointFaultTriggered(
+        mkBreakpointFaultRequest(actorId, t, isInput = true),
+        asyncRPCClient.mkContext(CONTROLLER)
+      )
+    }
     logger.warn(e.getLocalizedMessage + "\n" + e.getStackTrace.mkString("\n"))
     // invoke a pause in-place
     pauseManager.pause(OperatorLogicPause)

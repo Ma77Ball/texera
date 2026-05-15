@@ -20,10 +20,15 @@
 package org.apache.texera.amber.error
 
 import com.google.protobuf.timestamp.Timestamp
+import org.apache.texera.amber.core.tuple.Tuple
 import org.apache.texera.amber.core.virtualidentity.ActorVirtualIdentity
-import org.apache.texera.amber.engine.architecture.rpc.controlcommands.ConsoleMessage
+import org.apache.texera.amber.engine.architecture.rpc.controlcommands.{
+  BreakpointFaultTriggeredRequest,
+  ConsoleMessage
+}
 import org.apache.texera.amber.engine.architecture.rpc.controlcommands.ConsoleMessageType.ERROR
 import org.apache.texera.amber.engine.architecture.rpc.controlreturns.{ControlError, ErrorLanguage}
+import org.apache.texera.amber.engine.common.executionruntimestate.BreakpointFault
 import org.apache.texera.amber.util.VirtualIdentityUtils
 
 import java.time.Instant
@@ -56,6 +61,40 @@ object ErrorUtils {
     val message = err.getStackTrace.mkString("\n")
     ConsoleMessage(actorId.name, Timestamp(Instant.now), ERROR, source, title, message)
   }
+
+  // String.valueOf renders null fields as the literal "null" so the
+  // frontend always has something to show next to the exception, rather
+  // than crashing here on a NPE.
+  private def renderTupleForBreakpoint(tuple: Tuple): Seq[String] =
+    tuple.getFields.iterator.map(String.valueOf).toSeq
+
+  def mkBreakpointFault(
+      actorId: ActorVirtualIdentity,
+      tuple: Tuple,
+      isInput: Boolean
+  ): BreakpointFault =
+    BreakpointFault(
+      workerName = actorId.name,
+      faultedTuple = Some(
+        BreakpointFault.BreakpointTuple(
+          id = 0L,
+          isInput = isInput,
+          tuple = renderTupleForBreakpoint(tuple)
+        )
+      )
+    )
+
+  def mkBreakpointFaultRequest(
+      actorId: ActorVirtualIdentity,
+      tuple: Tuple,
+      isInput: Boolean
+  ): BreakpointFaultTriggeredRequest =
+    BreakpointFaultTriggeredRequest(
+      workerName = actorId.name,
+      tupleId = 0L,
+      isInput = isInput,
+      tuple = renderTupleForBreakpoint(tuple)
+    )
 
   def mkControlError(err: Throwable): ControlError = {
     // Format each stack trace element with "at " prefix
