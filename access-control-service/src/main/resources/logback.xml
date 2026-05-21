@@ -22,7 +22,7 @@
         <!-- encoders are assigned the type ch.qos.logback.classic.encoder.PatternLayoutEncoder
             by default -->
         <encoder>
-            <pattern>[%date{ISO8601}] [%level] [%logger] [%thread] - %msg %n
+            <pattern>[%date{ISO8601}] [%level] [%logger] [%thread] [trace=%X{trace_id:-} span=%X{span_id:-}] - %msg %n
             </pattern>
         </encoder>
     </appender>
@@ -35,7 +35,7 @@
             <fileNamePattern>logs/access-control-service-%d{yyyy-MM-dd}.log.gz</fileNamePattern>
         </rollingPolicy>
         <encoder>
-            <pattern>[%date{ISO8601}] [%level] [%logger] [%thread] - %msg %n</pattern>
+            <pattern>[%date{ISO8601}] [%level] [%logger] [%thread] [trace=%X{trace_id:-} span=%X{span_id:-}] - %msg %n</pattern>
         </encoder>
     </appender>
 
@@ -45,9 +45,12 @@
         <appender-ref ref="FILE"/>
     </appender>
 
+    <appender name="OTEL" class="org.apache.texera.observability.TexeraOtelAppender"/>
+
     <root level="${TEXERA_SERVICE_LOG_LEVEL:-INFO}">
         <appender-ref ref="ASYNC"/>
         <appender-ref ref="STDOUT"/>
+        <appender-ref ref="OTEL"/>
     </root>
     <logger name="org.apache" level="WARN"/>
     <logger name="httpclient" level="WARN"/>

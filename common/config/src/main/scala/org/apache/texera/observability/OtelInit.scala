@@ -128,6 +128,9 @@ object OtelInit extends LazyLogging {
 
     val sdk = OpenTelemetrySdk.builder().setTracerProvider(tracerProvider).build()
 
+    // Install on the Logback appender so logs are bridged through this SDK.
+    TexeraOtelAppender.setOpenTelemetry(sdk)
+
     // Emit a single startup span so any configured exporter sees activity. Body is
     // intentionally minimal — no env values, no hostnames beyond service.name.
     val span = sdk.getTracer("org.apache.texera.observability").spanBuilder("service.start").startSpan()

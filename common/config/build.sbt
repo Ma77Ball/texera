@@ -57,6 +57,10 @@ libraryDependencies ++= Seq(
   "io.opentelemetry" % "opentelemetry-sdk" % "1.42.1",
   "io.opentelemetry" % "opentelemetry-exporter-otlp" % "1.42.1",
   "io.opentelemetry" % "opentelemetry-sdk-extension-autoconfigure" % "1.42.1",
+  // Logback appender bridge — appender class is loaded by logback.xml at runtime.
+  // `provided` because each service ships its own logback transitively.
+  "ch.qos.logback" % "logback-classic" % "1.2.13" % Provided,
   "io.opentelemetry" % "opentelemetry-sdk-testing" % "1.42.1" % Test,
+  "ch.qos.logback" % "logback-classic" % "1.2.13" % Test,
   "org.scalatest" %% "scalatest" % "3.2.17" % Test
 )
