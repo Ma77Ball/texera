@@ -225,6 +225,12 @@ workflowComputingUnitPool:
     targetPort: 8085
 
 texeraEnvVars:
+  # OpenTelemetry is default-disabled. To enable, set OTEL_SDK_DISABLED=false
+  # plus an OTEL_EXPORTER_OTLP_ENDPOINT in the allowlist enforced by OtelInit
+  # (localhost / 127.0.0.1 / ::1 / otel-collector*). To attach the OpenTelemetry
+  # Java agent (free HTTP/JDBC/Pekko spans), mount the agent JAR into the image
+  # and add JAVA_TOOL_OPTIONS=-javaagent:/path/to/opentelemetry-javaagent.jar.
+  # See todo_observability.md for the full plan.
   - name: USER_SYS_ADMIN_USERNAME
     value: "texera"
   - name: USER_SYS_ADMIN_PASSWORD

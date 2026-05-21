@@ -30,6 +30,8 @@ import org.apache.texera.amber.engine.architecture.controller.ControllerConfig
 import org.apache.texera.amber.engine.architecture.controller.ExecutionStateUpdate
 import org.apache.texera.amber.engine.architecture.controller.execution.WorkflowExecution
 import org.apache.texera.amber.engine.common.rpc.AsyncRPCClient
+import org.apache.texera.observability.{OtelInit, WorkflowTracing}
+import io.opentelemetry.context.Context
 
 import java.util.concurrent.atomic.AtomicBoolean
 import scala.collection.mutable
@@ -97,22 +99,32 @@ class WorkflowExecutionCoordinator(
       .collect(
         nextRegions
           .map(region => {
-            val isRestart = workflowExecution.hasRegionExecution(region.id)
-            if (isRestart) {
-              workflowExecution.restartRegionExecution(region)
-            } else {
-              workflowExecution.initRegionExecution(region)
+            // Discrete "region.dispatch" span — covers init + coordinator
+            // construction (synchronous). Async region work continues in the
+            // returned RegionExecutionCoordinator and is not parented here
+            // because Twitter Futures do not propagate OTel Context.
+            WorkflowTracing.withOperatorSpan(
+              OtelInit.openTelemetry,
+              operatorId = region.id.id.toString,
+              parentContext = Context.current()
+            ) { _ =>
+              val isRestart = workflowExecution.hasRegionExecution(region.id)
+              if (isRestart) {
+                workflowExecution.restartRegionExecution(region)
+              } else {
+                workflowExecution.initRegionExecution(region)
+              }
+              regionExecutionCoordinators(region.id) = new RegionExecutionCoordinator(
+                region,
+                isRestart,
+                workflowExecution,
+                asyncRPCClient,
+                controllerConfig,
+                actorService,
+                actorRefService
+              )
+              regionExecutionCoordinators(region.id)
             }
-            regionExecutionCoordinators(region.id) = new RegionExecutionCoordinator(
-              region,
-              isRestart,
-              workflowExecution,
-              asyncRPCClient,
-              controllerConfig,
-              actorService,
-              actorRefService
-            )
-            regionExecutionCoordinators(region.id)
           })
           .map(_.syncStatusAndTransitionRegionExecutionPhase())
           .toSeq

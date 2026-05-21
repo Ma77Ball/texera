@@ -131,6 +131,31 @@ Before making any of the changes below, please [stop Texera](#stop) first. Once 
 
 All changes below are to the `.env` file in the installation folder, unless otherwise noted.
 
+### Enable OpenTelemetry (optional)
+
+Texera ships with OpenTelemetry instrumentation disabled by default
+(`OTEL_SDK_DISABLED=true`). To turn it on for a single-node deployment, add
+the following to `.env`:
+
+```
+OTEL_SDK_DISABLED=false
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+```
+
+The endpoint host must be in the allowlist enforced by `OtelInit`
+(`localhost`, `127.0.0.1`, `::1`, or `otel-collector*`). Other hosts are
+rejected and the SDK stays disabled.
+
+To also attach the OpenTelemetry Java agent for free HTTP / JDBC / Pekko
+spans, download the agent JAR (Apache 2.0) into a host directory, mount it
+into each backend container, and set:
+
+```
+JAVA_TOOL_OPTIONS=-javaagent:/opt/otel/opentelemetry-javaagent.jar
+```
+
+The agent JAR is not committed; supply it at deploy time.
+
 ### Run Texera on other ports
 By default, Texera uses:
 - Port 8080 for its web service

@@ -189,7 +189,12 @@ class PythonProxyClient(portNumberPromise: Promise[Int], val actorId: ActorVirtu
     logger.debug(s"sending ${action.getType} message")
     // Arrow allows multiple results from the Action call return as a stream (interator).
     // In Arrow 11, it alerts if the results are not consumed fully.
-    val results = flightClient.doAction(action)
+    // Inject W3C traceparent for cross-process trace propagation. None when
+    // no valid current span — we never forge from incomplete state.
+    val results = TraceparentHeaders.fromCurrentContext() match {
+      case Some(headers) => flightClient.doAction(action, headers)
+      case None          => flightClient.doAction(action)
+    }
     // As we do our own Async RPC management, we are currently not using results from Action call.
     // In the future, this results can include credits for flow control purpose.
     val result = results.next()

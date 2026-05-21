@@ -65,6 +65,9 @@ object OtelInit extends LazyLogging {
   private val initialized = new AtomicBoolean(false)
   @volatile private var current: OpenTelemetry = OpenTelemetry.noop()
 
+  /** The active SDK, or [[OpenTelemetry.noop]] if init hasn't run or stayed disabled. */
+  def openTelemetry: OpenTelemetry = current
+
   /**
    * Initialize OpenTelemetry from the process environment.
    *
