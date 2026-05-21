@@ -56,6 +56,17 @@ object S3StorageClient {
   }
 
   /**
+    * Lightweight readiness ping used by healthcheck endpoints. Resolves the S3
+    * service endpoint via the SDK's metadata operation; throws on connection
+    * failure, expired credentials, or misconfigured endpoint.
+    */
+  def ping(): Unit = {
+    // listBuckets is the cheapest op MinIO + S3 both implement; the response
+    // is discarded — we only care that a round-trip completed.
+    s3Client.listBuckets()
+  }
+
+  /**
     * Checks if a directory (prefix) exists within an S3 bucket.
     *
     * @param bucketName The bucket name.

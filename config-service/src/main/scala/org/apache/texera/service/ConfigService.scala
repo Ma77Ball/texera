@@ -29,7 +29,12 @@ import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.auth.{JwtAuthFilter, RequestLoggingFilter, SessionUser}
 import org.apache.texera.config.DefaultsConfig
 import org.apache.texera.dao.SqlServer
-import org.apache.texera.service.resource.{ConfigResource, HealthCheckResource}
+import org.apache.texera.healthcheck.{
+  HealthCheckDetailsResource,
+  HealthCheckResource,
+  JdbcHealthCheck
+}
+import org.apache.texera.service.resource.ConfigResource
 import org.eclipse.jetty.server.session.SessionHandler
 import org.jooq.impl.DSL
 
@@ -61,7 +66,9 @@ class ConfigService extends Application[ConfigServiceConfiguration] with LazyLog
     environment.jersey.register(classOf[SessionHandler])
     environment.servlets.setSessionHandler(new SessionHandler)
 
-    environment.jersey.register(classOf[HealthCheckResource])
+    val readinessChecks = Seq(new JdbcHealthCheck())
+    environment.jersey.register(new HealthCheckResource(readinessChecks))
+    environment.jersey.register(new HealthCheckDetailsResource(readinessChecks))
 
     // Register JWT authentication filter
     environment.jersey.register(new AuthDynamicFeature(classOf[JwtAuthFilter]))

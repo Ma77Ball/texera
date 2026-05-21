@@ -26,7 +26,8 @@ import io.dropwizard.core.setup.{Bootstrap, Environment}
 import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.amber.util.ObjectMapperUtils
 import org.apache.texera.dao.SqlServer
-import org.apache.texera.service.resource.{HealthCheckResource, WorkflowCompilationResource}
+import org.apache.texera.healthcheck.{HealthCheckResource, JdbcHealthCheck}
+import org.apache.texera.service.resource.WorkflowCompilationResource
 import org.eclipse.jetty.servlet.FilterHolder
 
 import java.nio.file.Path
@@ -59,7 +60,8 @@ class WorkflowCompilingService extends Application[WorkflowCompilingServiceConfi
       StorageConfig.jdbcPassword
     )
 
-    environment.jersey.register(classOf[HealthCheckResource])
+    // No admin/details endpoint here: this service does not register an auth filter.
+    environment.jersey.register(new HealthCheckResource(Seq(new JdbcHealthCheck())))
 
     // register the compilation endpoint
     environment.jersey.register(classOf[WorkflowCompilationResource])

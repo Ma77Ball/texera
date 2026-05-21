@@ -27,10 +27,14 @@ import io.dropwizard.core.setup.{Bootstrap, Environment}
 import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.auth.{JwtAuthFilter, RequestLoggingFilter, SessionUser}
 import org.apache.texera.dao.SqlServer
+import org.apache.texera.healthcheck.{
+  HealthCheckDetailsResource,
+  HealthCheckResource,
+  JdbcHealthCheck
+}
 import org.apache.texera.service.resource.{
   ComputingUnitAccessResource,
-  ComputingUnitManagingResource,
-  HealthCheckResource
+  ComputingUnitManagingResource
 }
 import java.nio.file.Path
 
@@ -60,7 +64,9 @@ class ComputingUnitManagingService extends Application[ComputingUnitManagingServ
     )
     // Register http resources
     environment.jersey.setUrlPattern("/api/*")
-    environment.jersey.register(classOf[HealthCheckResource])
+    val readinessChecks = Seq(new JdbcHealthCheck())
+    environment.jersey.register(new HealthCheckResource(readinessChecks))
+    environment.jersey.register(new HealthCheckDetailsResource(readinessChecks))
 
     // Register JWT authentication filter
     environment.jersey.register(new AuthDynamicFeature(classOf[JwtAuthFilter]))

@@ -59,5 +59,7 @@ libraryDependencies ++= Seq(
   "jakarta.ws.rs" % "jakarta.ws.rs-api" % "3.0.0",                      // for JwtAuthFilter
   "jakarta.servlet" % "jakarta.servlet-api" % "5.0.0" % "provided",    // for RequestLoggingFilter
   "org.eclipse.jetty" % "jetty-servlet" % "11.0.24" % "provided",      // for FilterHolder
-  "org.scalatest" %% "scalatest" % "3.2.17" % Test
+  "org.scalatest" %% "scalatest" % "3.2.17" % Test,
+  // RuntimeDelegate impl so HealthCheckResource unit tests can build jakarta Response objects
+  "org.glassfish.jersey.core" % "jersey-common" % "3.0.12" % Test
 )

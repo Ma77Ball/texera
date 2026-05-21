@@ -30,13 +30,15 @@ import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.amber.core.storage.util.LakeFSStorageClient
 import org.apache.texera.auth.{JwtAuthFilter, RequestLoggingFilter, SessionUser}
 import org.apache.texera.dao.SqlServer
+import org.apache.texera.healthcheck.{
+  HealthCheck,
+  HealthCheckDetailsResource,
+  HealthCheckResource,
+  JdbcHealthCheck
+}
 import org.apache.texera.service.`type`.DatasetFileNode
 import org.apache.texera.service.`type`.serde.DatasetFileNodeSerializer
-import org.apache.texera.service.resource.{
-  DatasetAccessResource,
-  DatasetResource,
-  HealthCheckResource
-}
+import org.apache.texera.service.resource.{DatasetAccessResource, DatasetResource}
 import org.apache.texera.service.util.S3StorageClient
 import org.apache.texera.service.util.LargeBinaryManager
 import org.eclipse.jetty.server.session.SessionHandler
@@ -79,7 +81,13 @@ class FileService extends Application[FileServiceConfiguration] with LazyLogging
     environment.jersey.register(classOf[SessionHandler])
     environment.servlets.setSessionHandler(new SessionHandler)
 
-    environment.jersey.register(classOf[HealthCheckResource])
+    val readinessChecks = Seq(
+      new JdbcHealthCheck(),
+      HealthCheck("minio")(S3StorageClient.ping()),
+      HealthCheck("lakefs")(LakeFSStorageClient.healthCheck())
+    )
+    environment.jersey.register(new HealthCheckResource(readinessChecks))
+    environment.jersey.register(new HealthCheckDetailsResource(readinessChecks))
 
     // Register JWT authentication filter
     environment.jersey.register(new AuthDynamicFeature(classOf[JwtAuthFilter]))

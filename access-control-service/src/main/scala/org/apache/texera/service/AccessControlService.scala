@@ -26,10 +26,14 @@ import io.dropwizard.core.setup.{Bootstrap, Environment}
 import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.auth.{JwtAuthFilter, RequestLoggingFilter, SessionUser}
 import org.apache.texera.dao.SqlServer
+import org.apache.texera.healthcheck.{
+  HealthCheckDetailsResource,
+  HealthCheckResource,
+  JdbcHealthCheck
+}
 import org.apache.texera.service.activity.UserActivityEventListener
 import org.apache.texera.service.resource.{
   AccessControlResource,
-  HealthCheckResource,
   LiteLLMModelsResource,
   LiteLLMProxyResource
 }
@@ -65,7 +69,9 @@ class AccessControlService extends Application[AccessControlServiceConfiguration
     environment.jersey.register(classOf[SessionHandler])
     environment.servlets.setSessionHandler(new SessionHandler)
 
-    environment.jersey.register(classOf[HealthCheckResource])
+    val readinessChecks = Seq(new JdbcHealthCheck())
+    environment.jersey.register(new HealthCheckResource(readinessChecks))
+    environment.jersey.register(new HealthCheckDetailsResource(readinessChecks))
     environment.jersey.register(classOf[AccessControlResource])
     environment.jersey.register(classOf[LiteLLMProxyResource])
     environment.jersey.register(classOf[LiteLLMModelsResource])

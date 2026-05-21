@@ -17,14 +17,23 @@
  * under the License.
  */
 
-package org.apache.texera.service.resource
+package org.apache.texera.healthcheck
 
-import jakarta.ws.rs.core.MediaType
-import jakarta.ws.rs.{GET, Path, Produces}
+import org.apache.texera.dao.SqlServer
+import org.jooq.impl.DSL
 
-@Path("/healthcheck")
-@Produces(Array(MediaType.APPLICATION_JSON))
-class HealthCheckResource {
-  @GET
-  def healthCheck: Map[String, String] = Map("status" -> "ok")
+/**
+  * Borrows a connection from the HikariCP pool that `SqlServer` already owns
+  * and runs `SELECT 1`. Surfaces an unhealthy pool or unreachable Postgres as
+  * a failed check; the underlying `SQLException` class is reported via the
+  * admin details endpoint but never to anonymous callers.
+  */
+class JdbcHealthCheck(override val name: String = "db") extends HealthCheck {
+  override def check(): Unit = {
+    val ctx = SqlServer.getInstance().createDSLContext()
+    val result = ctx.fetchOne(DSL.select(DSL.inline(1)))
+    if (result == null || result.get(0, classOf[Integer]).intValue() != 1) {
+      throw new IllegalStateException("db ping returned unexpected value")
+    }
+  }
 }

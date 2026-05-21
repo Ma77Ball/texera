@@ -31,6 +31,7 @@ import org.apache.texera.amber.engine.common.Utils
 import org.apache.texera.amber.util.ObjectMapperUtils
 import org.apache.texera.auth.SessionUser
 import org.apache.texera.dao.SqlServer
+import org.apache.texera.healthcheck.JdbcHealthCheck
 import org.apache.texera.web.auth.JwtAuth.setupJwtAuth
 import org.apache.texera.web.resource._
 import org.apache.texera.web.resource.auth.{AuthResource, GoogleAuthResource}
@@ -132,7 +133,9 @@ class TexeraWebApplication
     environment.jersey.register(classOf[SystemMetadataResource])
     // environment.jersey().register(classOf[MockKillWorkerResource])
 
-    environment.jersey.register(classOf[HealthCheckResource])
+    val readinessChecks = Seq(new JdbcHealthCheck())
+    environment.jersey.register(new HealthCheckResource(readinessChecks))
+    environment.jersey.register(new HealthCheckDetailsResource(readinessChecks))
 
     setupJwtAuth(environment)
 

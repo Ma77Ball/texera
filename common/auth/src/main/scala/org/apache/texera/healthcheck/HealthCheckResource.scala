@@ -17,29 +17,33 @@
  * under the License.
  */
 
-package org.apache.texera.web.resource
+package org.apache.texera.healthcheck
 
-import org.apache.texera.healthcheck._
-
-import javax.servlet.http.HttpServletRequest
-import javax.ws.rs.core.{Context, MediaType, Response}
-import javax.ws.rs.{GET, Path, Produces}
+import jakarta.servlet.http.HttpServletRequest
+import jakarta.ws.rs.core.{Context, MediaType, Response}
+import jakarta.ws.rs.{GET, Path, Produces}
 
 /**
-  * `javax`-flavored mirror of `org.apache.texera.healthcheck.HealthCheckResource`
-  * for the legacy Dropwizard 1.3 stack amber rides on. Shares the same pure-Scala
-  * runner / rate-limiter so the two stacks can't drift.
+  * Anonymous-callable liveness / readiness probes for k8s.
+  *
+  * `live`  → 200 as long as the process is up.
+  * `ready` → 200/503, body is `{status, checks: [{name, ok}]}` with no error
+  * strings, versions, hostnames, or stack traces.
+  *
+  * Per-source-IP token bucket caps the rate at which one peer can poke the
+  * dependencies a readiness check fans out to.
   */
 @Path("/healthcheck")
 @Produces(Array(MediaType.APPLICATION_JSON))
 class HealthCheckResource(
-    checks: Seq[HealthCheck] = Seq.empty,
+    checks: Seq[HealthCheck],
     rateLimiter: IpRateLimiter = new IpRateLimiter(),
     perCheckTimeoutMillis: Long = 500L
 ) {
 
   private val runner = new HealthCheckRunner(checks, perCheckTimeoutMillis)
 
+  // Backwards-compatible alias for legacy /api/healthcheck callers. Behaves like /live.
   @GET
   def root(@Context req: HttpServletRequest): Response = live(req)
 
@@ -67,14 +71,17 @@ class HealthCheckResource(
 }
 
 object HealthCheckResource {
-  private[resource] def clientIp(req: HttpServletRequest): String = {
+
+  /**
+    * Resolve the caller IP for rate-limiting. Trust `X-Forwarded-For` only if
+    * one is present — we treat the *left-most* token as the original client
+    * (k8s-style L4/L7 proxies prepend). `req.getRemoteAddr` is the fallback.
+    */
+  private[healthcheck] def clientIp(req: HttpServletRequest): String = {
     val xff = Option(req.getHeader("X-Forwarded-For")).map(_.trim).filter(_.nonEmpty)
     xff.map(_.split(",")(0).trim).getOrElse(Option(req.getRemoteAddr).getOrElse("unknown"))
   }
 
-  private[resource] def tooManyRequests: Response =
-    Response
-      .status(429)
-      .entity(java.util.Collections.singletonMap("status", "rate_limited"))
-      .build()
+  private[healthcheck] def tooManyRequests: Response =
+    Response.status(429).entity(Map("status" -> "rate_limited")).build()
 }
