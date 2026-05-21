@@ -30,10 +30,10 @@ import org.apache.texera.amber.engine.architecture.controller.ControllerConfig
 import org.apache.texera.amber.engine.architecture.controller.ExecutionStateUpdate
 import org.apache.texera.amber.engine.architecture.controller.execution.WorkflowExecution
 import org.apache.texera.amber.engine.common.rpc.AsyncRPCClient
-import org.apache.texera.observability.{OtelInit, WorkflowTracing}
+import org.apache.texera.observability.{OtelInit, WorkflowMetrics, WorkflowTracing}
 import io.opentelemetry.context.Context
 
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
 import scala.collection.mutable
 
 class WorkflowExecutionCoordinator(
@@ -50,6 +50,12 @@ class WorkflowExecutionCoordinator(
       : mutable.HashMap[RegionIdentity, RegionExecutionCoordinator] =
     mutable.HashMap()
   private val completionNotified: AtomicBoolean = new AtomicBoolean(false)
+  private val startNotified: AtomicBoolean = new AtomicBoolean(false)
+  private val startNanos: AtomicLong = new AtomicLong(0L)
+  private lazy val metrics: WorkflowMetrics = new WorkflowMetrics(OtelInit.openTelemetry)
+  // Coarse, schedule-shaped kind for now. Per-workflow detail belongs in
+  // traces / logs — never in metric labels.
+  private val WorkflowKind = "batch"
 
   @transient var actorRefService: PekkoActorRefMappingService = _
 
@@ -89,11 +95,19 @@ class WorkflowExecutionCoordinator(
     val nextRegions = if (!schedule.hasNext) Set.empty[Region] else schedule.next()
     if (nextRegions.isEmpty) {
       if (workflowExecution.isCompleted && completionNotified.compareAndSet(false, true)) {
+        // Workflow has truly completed exactly once — emit terminal metrics
+        // before the client notification so failure paths still see them.
+        emitCompletionMetrics()
         asyncRPCClient.sendToClient(ExecutionStateUpdate(workflowExecution.getState))
       }
       return Future.Unit
     }
 
+    if (startNotified.compareAndSet(false, true)) {
+      startNanos.set(System.nanoTime())
+      metrics.recordStart(WorkflowKind)
+      metrics.recordActive(1)
+    }
     executedRegions.append(nextRegions)
     Future
       .collect(
@@ -130,6 +144,23 @@ class WorkflowExecutionCoordinator(
           .toSeq
       )
       .unit
+  }
+
+  private def emitCompletionMetrics(): Unit = {
+    import org.apache.texera.amber.engine.architecture.rpc.controlreturns.WorkflowAggregatedState._
+    val state = workflowExecution.getState
+    val outcome = state match {
+      case COMPLETED              => "ok"
+      case FAILED                 => "failed"
+      case KILLED | TERMINATED    => "cancelled"
+      case _                      => "cancelled"
+    }
+    val durationMs =
+      if (startNanos.get() == 0L) 0L
+      else (System.nanoTime() - startNanos.get()) / 1_000_000L
+    metrics.recordCompletion(durationMs, outcome, WorkflowKind)
+    if (state == FAILED) metrics.recordFailure(WorkflowKind)
+    metrics.recordActive(-1)
   }
 
   def getRegionOfLink(link: PhysicalLink): Region = {

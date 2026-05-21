@@ -22,6 +22,8 @@ import io.opentelemetry.api.OpenTelemetry
 import io.opentelemetry.sdk.OpenTelemetrySdk
 import io.opentelemetry.sdk.common.CompletableResultCode
 import io.opentelemetry.sdk.resources.Resource
+import io.opentelemetry.sdk.metrics.SdkMeterProvider
+import io.opentelemetry.sdk.metrics.`export`.MetricReader
 import io.opentelemetry.sdk.trace.SdkTracerProvider
 import io.opentelemetry.sdk.trace.`export`.{SimpleSpanProcessor, SpanExporter}
 
@@ -76,7 +78,7 @@ object OtelInit extends LazyLogging {
    */
   def init(serviceName: String, serviceVersion: String): OpenTelemetry = {
     if (!initialized.compareAndSet(false, true)) return current
-    current = build(sys.env, serviceName, serviceVersion, testExporter = None)
+    current = build(sys.env, serviceName, serviceVersion, testExporter = None, testMetricReader = None)
     current
   }
 
@@ -86,15 +88,16 @@ object OtelInit extends LazyLogging {
     init(serviceName, v)
   }
 
-  /** Test-only entry point: reset the singleton and inject env / exporter. */
+  /** Test-only entry point: reset the singleton and inject env / exporter / reader. */
   private[observability] def initForTesting(
       env: Map[String, String],
       serviceName: String,
       serviceVersion: String,
-      testExporter: Option[SpanExporter]
+      testExporter: Option[SpanExporter] = None,
+      testMetricReader: Option[MetricReader] = None
   ): OpenTelemetry = {
     initialized.set(true)
-    current = build(env, serviceName, serviceVersion, testExporter)
+    current = build(env, serviceName, serviceVersion, testExporter, testMetricReader)
     current
   }
 
@@ -107,7 +110,8 @@ object OtelInit extends LazyLogging {
       env: Map[String, String],
       serviceName: String,
       serviceVersion: String,
-      testExporter: Option[SpanExporter]
+      testExporter: Option[SpanExporter],
+      testMetricReader: Option[MetricReader]
   ): OpenTelemetry = {
     val disabled = env.get("OTEL_SDK_DISABLED").forall(_.equalsIgnoreCase("true"))
     if (disabled) return OpenTelemetry.noop()
@@ -121,6 +125,13 @@ object OtelInit extends LazyLogging {
       case _ => // empty or allowlisted — fine
     }
 
+    // Validate OTEL_METRIC_EXPORT_INTERVAL — clamp to [1s, 10m]. Out-of-range
+    // values are reset to the SDK default with one WARN. The validated value
+    // is not currently passed to a PeriodicMetricReader (that's wired by the
+    // OTEL Java agent / autoconfigure when an OTLP endpoint is present); the
+    // clamp lives here so a hostile env cannot force the SDK into a busy loop.
+    env.get("OTEL_METRIC_EXPORT_INTERVAL").foreach(validateMetricInterval)
+
     val resource = buildResource(env, serviceName, serviceVersion)
     val exporter: SpanExporter = testExporter.getOrElse(NoopSpanExporter)
     val tracerProvider = SdkTracerProvider
@@ -129,7 +140,15 @@ object OtelInit extends LazyLogging {
       .addSpanProcessor(SimpleSpanProcessor.create(exporter))
       .build()
 
-    val sdk = OpenTelemetrySdk.builder().setTracerProvider(tracerProvider).build()
+    val meterProviderBuilder = SdkMeterProvider.builder().setResource(resource)
+    testMetricReader.foreach(meterProviderBuilder.registerMetricReader)
+    val meterProvider = meterProviderBuilder.build()
+
+    val sdk = OpenTelemetrySdk
+      .builder()
+      .setTracerProvider(tracerProvider)
+      .setMeterProvider(meterProvider)
+      .build()
 
     // Emit a single startup span so any configured exporter sees activity. Body is
     // intentionally minimal — no env values, no hostnames beyond service.name.
@@ -139,6 +158,27 @@ object OtelInit extends LazyLogging {
     } finally span.end()
 
     sdk
+  }
+
+  private val MinMetricIntervalMs = 1000L
+  private val MaxMetricIntervalMs = 600_000L
+
+  /** Returns the clamped value in ms, or None if the env var was malformed.
+    * Out-of-range values produce one WARN. */
+  private[observability] def validateMetricInterval(raw: String): Option[Long] = {
+    try {
+      val ms = raw.toLong
+      if (ms < MinMetricIntervalMs || ms > MaxMetricIntervalMs) {
+        logger.warn(
+          s"OTEL_METRIC_EXPORT_INTERVAL=$ms is out of range [$MinMetricIntervalMs, $MaxMetricIntervalMs]; ignoring."
+        )
+        None
+      } else Some(ms)
+    } catch {
+      case _: NumberFormatException =>
+        logger.warn(s"OTEL_METRIC_EXPORT_INTERVAL='$raw' is not a number; ignoring.")
+        None
+    }
   }
 
   private def endpointAllowed(endpoint: String): Boolean = {
