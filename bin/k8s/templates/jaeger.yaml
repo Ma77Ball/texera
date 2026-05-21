@@ -1,0 +1,130 @@
+{{- if .Values.observability.enabled }}
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# Jaeger all-in-one: collector + query UI + in-memory storage. Suitable for
+# single-namespace dev/observability; a Cassandra- or OpenSearch-backed
+# production deployment is a follow-up.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: query
+      port: {{ .Values.observability.jaeger.queryPort }}
+      targetPort: {{ .Values.observability.jaeger.queryPort }}
+    - name: otlp-grpc
+      port: {{ .Values.observability.jaeger.otlpGrpcPort }}
+      targetPort: {{ .Values.observability.jaeger.otlpGrpcPort }}
+    - name: otlp-http
+      port: {{ .Values.observability.jaeger.otlpHttpPort }}
+      targetPort: {{ .Values.observability.jaeger.otlpHttpPort }}
+  selector:
+    app: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: jaeger
+          image: {{ .Values.observability.jaeger.image }}
+          imagePullPolicy: {{ .Values.observability.jaeger.imagePullPolicy }}
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+            - name: SPAN_STORAGE_TYPE
+              value: "memory"
+          ports:
+            - name: query
+              containerPort: {{ .Values.observability.jaeger.queryPort }}
+            - name: otlp-grpc
+              containerPort: {{ .Values.observability.jaeger.otlpGrpcPort }}
+            - name: otlp-http
+              containerPort: {{ .Values.observability.jaeger.otlpHttpPort }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: query
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: query
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.observability.jaeger.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+---
+# Ingest port locked to the collector. Query API stays open in-namespace so
+# operators (or the UI iframe planned for PR 8) can read traces.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+      ports:
+        - port: {{ .Values.observability.jaeger.otlpGrpcPort }}
+        - port: {{ .Values.observability.jaeger.otlpHttpPort }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - port: {{ .Values.observability.jaeger.queryPort }}
+{{- end }}

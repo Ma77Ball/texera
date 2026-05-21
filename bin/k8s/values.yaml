@@ -348,3 +348,98 @@ envoy-gateway:
       extensionApis:
         enableBackend: true
         enableEnvoyPatchPolicy: true
+
+# ---------------------------------------------------------------------------
+# Observability stack (OpenTelemetry collector + Apache-2.0 backends).
+#
+# All four pieces are gated on `observability.enabled` and ship as ClusterIP
+# only — no Ingress / LoadBalancer is rendered, so operators must opt in
+# explicitly to expose any UI off-cluster. Per Texera's PR plan this PR ships
+# the *backends*; emitter wiring in Texera services lands in PR 1.
+#
+# References:
+#   * Apache-2.0 only (Category A). Do not swap Prometheus/Jaeger/OpenSearch
+#     for Grafana, Loki, Tempo, or Elastic — those are AGPL or SSPL.
+#   * OpenSearch ships with the security plugin enabled. Demo certs are
+#     disabled and a randomised admin password is materialised into the
+#     `{Release}-opensearch-admin` Secret at install time.
+# ---------------------------------------------------------------------------
+observability:
+  enabled: false
+
+  collector:
+    name: otel-collector
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    imagePullPolicy: IfNotPresent
+    # OTLP receivers cluster-local only.
+    grpcPort: 4317
+    httpPort: 4318
+    # Optional bearer-token authentication on inbound OTLP. Off by default —
+    # in-cluster traffic is constrained by NetworkPolicy below.
+    bearerToken: ""
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "200Mi"
+      limits:
+        cpu: "500m"
+        memory: "512Mi"
+
+  prometheus:
+    name: prometheus
+    image: prom/prometheus:v3.0.1
+    imagePullPolicy: IfNotPresent
+    port: 9090
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
+    retention: "15d"
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+
+  jaeger:
+    name: jaeger
+    # `all-in-one` keeps query UI, collector, and in-memory storage in one
+    # container. Production should swap in a backed Jaeger Collector that
+    # writes to Cassandra/OpenSearch; left as a follow-up.
+    image: jaegertracing/all-in-one:1.62.0
+    imagePullPolicy: IfNotPresent
+    queryPort: 16686
+    otlpGrpcPort: 4317
+    otlpHttpPort: 4318
+    resources:
+      requests:
+        cpu: "100m"
+        memory: "256Mi"
+      limits:
+        cpu: "500m"
+        memory: "1Gi"
+
+  opensearch:
+    name: opensearch
+    image: opensearchproject/opensearch:2.18.0
+    imagePullPolicy: IfNotPresent
+    port: 9200
+    transportPort: 9300
+    # Disable the bundled demo certs / demo users.  Auto-generated transport
+    # certs are produced by an initContainer at first install; the admin user's
+    # password is randomised via Helm's `randAlphaNum` and lives in a Secret.
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""
+    javaHeap: "512m"
+    resources:
+      requests:
+        cpu: "200m"
+        memory: "1Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+

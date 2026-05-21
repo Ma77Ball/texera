@@ -1,0 +1,272 @@
+{{- if .Values.observability.enabled }}
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# OpenTelemetry Collector — fan-out pipeline:
+#   OTLP (gRPC + HTTP) → Prometheus remote-write
+#                      → Jaeger OTLP
+#                      → OpenSearch logs
+# Exposure is restricted to in-cluster traffic via the NetworkPolicy below.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.observability.collector.name }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+data:
+  collector.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+      basicauth/opensearch:
+        client_auth:
+          username: "${env:OPENSEARCH_USERNAME}"
+          password: "${env:OPENSEARCH_PASSWORD}"
+      {{- if .Values.observability.collector.bearerToken }}
+      bearertokenauth/inbound:
+        scheme: "Bearer"
+        token: "${env:OTEL_INBOUND_TOKEN}"
+      {{- end }}
+
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:{{ .Values.observability.collector.grpcPort }}
+            {{- if .Values.observability.collector.bearerToken }}
+            auth:
+              authenticator: bearertokenauth/inbound
+            {{- end }}
+          http:
+            endpoint: 0.0.0.0:{{ .Values.observability.collector.httpPort }}
+            {{- if .Values.observability.collector.bearerToken }}
+            auth:
+              authenticator: bearertokenauth/inbound
+            {{- end }}
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+      memory_limiter:
+        check_interval: 1s
+        # 80 % of the configured memory limit, in MiB.
+        limit_mib: 400
+        spike_limit_mib: 100
+
+    exporters:
+      # Traces → Jaeger via OTLP.
+      otlp/jaeger:
+        endpoint: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}:{{ .Values.observability.jaeger.otlpGrpcPort }}
+        tls:
+          insecure: true
+      # Metrics → Prometheus via remote-write. Prometheus exposes /api/v1/write
+      # only when started with `--web.enable-remote-write-receiver`.
+      prometheusremotewrite:
+        endpoint: http://{{ .Release.Name }}-{{ .Values.observability.prometheus.name }}:{{ .Values.observability.prometheus.port }}/api/v1/write
+        tls:
+          insecure: true
+      # Logs → OpenSearch. The admin password is mounted as an env var.
+      opensearch:
+        http:
+          endpoint: https://{{ .Release.Name }}-{{ .Values.observability.opensearch.name }}:{{ .Values.observability.opensearch.port }}
+          tls:
+            insecure_skip_verify: true
+          auth:
+            authenticator: basicauth/opensearch
+        logs_index: texera-logs
+
+      # Diagnostics; safe to enable, prints to stdout.
+      debug:
+        verbosity: basic
+
+    service:
+      extensions:
+        - health_check
+        - basicauth/opensearch
+        {{- if .Values.observability.collector.bearerToken }}
+        - bearertokenauth/inbound
+        {{- end }}
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/jaeger]
+        metrics:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [prometheusremotewrite]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [opensearch]
+      telemetry:
+        metrics:
+          address: 0.0.0.0:8888
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+spec:
+  type: ClusterIP
+  ports:
+    - name: otlp-grpc
+      port: {{ .Values.observability.collector.grpcPort }}
+      targetPort: {{ .Values.observability.collector.grpcPort }}
+    - name: otlp-http
+      port: {{ .Values.observability.collector.httpPort }}
+      targetPort: {{ .Values.observability.collector.httpPort }}
+  selector:
+    app: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+---
+{{- if .Values.observability.collector.bearerToken }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.observability.collector.name }}-token
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  token: {{ .Values.observability.collector.bearerToken | quote }}
+---
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: collector
+          image: {{ .Values.observability.collector.image }}
+          imagePullPolicy: {{ .Values.observability.collector.imagePullPolicy }}
+          args:
+            - "--config=/etc/otel/collector.yaml"
+          ports:
+            - name: otlp-grpc
+              containerPort: {{ .Values.observability.collector.grpcPort }}
+            - name: otlp-http
+              containerPort: {{ .Values.observability.collector.httpPort }}
+          env:
+            - name: OPENSEARCH_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-{{ .Values.observability.opensearch.name }}-admin
+                  key: username
+            - name: OPENSEARCH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-{{ .Values.observability.opensearch.name }}-admin
+                  key: password
+            {{- if .Values.observability.collector.bearerToken }}
+            - name: OTEL_INBOUND_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-{{ .Values.observability.collector.name }}-token
+                  key: token
+            {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.observability.collector.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-{{ .Values.observability.collector.name }}-config
+---
+# Only pods in this namespace can reach the collector's OTLP ports, and the
+# collector can only egress to the three backends + DNS + the K8s API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ .Release.Name }}-{{ .Values.observability.collector.name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      ports:
+        - port: {{ .Values.observability.collector.grpcPort }}
+        - port: {{ .Values.observability.collector.httpPort }}
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Backends in our own namespace.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-{{ .Values.observability.prometheus.name }}
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-{{ .Values.observability.jaeger.name }}
+        - podSelector:
+            matchLabels:
+              app: {{ .Release.Name }}-{{ .Values.observability.opensearch.name }}
+{{- end }}

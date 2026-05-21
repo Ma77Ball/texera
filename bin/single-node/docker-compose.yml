@@ -487,6 +487,94 @@ services:
     command: >
       sh -c 'apk add --no-cache curl jq bash > /dev/null 2>&1 && bash /examples/load-examples.sh'
 
+  # Part 5: Optional observability stack (Apache 2.0 only).
+  # All four services are guarded by the "observability" compose profile:
+  #   docker compose --profile observability up
+  # The Texera services in this file emit OTLP only when OTEL_SDK_DISABLED=false
+  # is set in .env; otherwise the stack runs idle. Off by default.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: texera-otel-collector
+    profiles:
+      - observability
+    depends_on:
+      jaeger:
+        condition: service_started
+      prometheus:
+        condition: service_started
+      opensearch:
+        condition: service_healthy
+    ports:
+      # Loopback-only by default. Operators who need to ship OTLP from
+      # outside containers can flip the host part to 0.0.0.0:.
+      - "127.0.0.1:4317:4317"  # OTLP gRPC
+      - "127.0.0.1:4318:4318"  # OTLP HTTP
+    environment:
+      - OPENSEARCH_USERNAME=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel/collector.yaml:ro
+    command: ["--config=/etc/otel/collector.yaml"]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: texera-prometheus
+    profiles:
+      - observability
+    ports:
+      - "127.0.0.1:9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-remote-write-receiver
+      - --web.listen-address=0.0.0.0:9090
+    volumes:
+      - ./prometheus-config.yaml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: texera-jaeger
+    profiles:
+      - observability
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+      - SPAN_STORAGE_TYPE=memory
+    ports:
+      - "127.0.0.1:16686:16686"  # query UI
+    restart: unless-stopped
+
+  opensearch:
+    image: opensearchproject/opensearch:2.18.0
+    container_name: texera-opensearch
+    profiles:
+      - observability
+    environment:
+      - cluster.name=texera-observability
+      - discovery.type=single-node
+      - bootstrap.memory_lock=false
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      # Randomise in production; the compose default exists so single-node
+      # smoke tests do not need extra setup.
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_ADMIN_PASSWORD:-admin}
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -ksf -u admin:${OPENSEARCH_ADMIN_PASSWORD:-admin} https://localhost:9200/_cluster/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
 networks:
   default:
     name: texera-single-node
@@ -496,3 +584,5 @@ volumes:
   minio_data:
   postgres_data:
   workflow_result_data:
+  prometheus_data:
+  opensearch_data:
