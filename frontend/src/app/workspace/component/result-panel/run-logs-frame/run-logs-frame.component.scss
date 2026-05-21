@@ -1,0 +1,105 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+.run-logs-frame {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font-family: ui-monospace, "Menlo", "Monaco", monospace;
+  font-size: 12px;
+}
+
+.run-logs-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.run-logs-search {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  border: 1px solid #c0c0c0;
+}
+
+.run-logs-level {
+  padding: 2px 4px;
+}
+
+.run-logs-total {
+  color: #666;
+  white-space: nowrap;
+}
+
+.run-logs-error {
+  padding: 8px;
+  background: #ffe6e6;
+  color: #a40000;
+}
+
+.run-logs-empty {
+  padding: 16px;
+  color: #666;
+  text-align: center;
+}
+
+.run-logs-list {
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.run-logs-row {
+  display: grid;
+  grid-template-columns: 180px 60px 1fr auto;
+  gap: 8px;
+  padding: 2px 8px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.run-logs-timestamp {
+  color: #888;
+}
+
+.run-logs-level-tag {
+  font-weight: 600;
+  text-align: center;
+}
+
+.run-logs-row[data-level="ERROR"] .run-logs-level-tag {
+  color: #c0392b;
+}
+
+.run-logs-row[data-level="WARN"] .run-logs-level-tag {
+  color: #d68910;
+}
+
+.run-logs-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.run-logs-trace-link {
+  color: #1d70b8;
+  text-decoration: underline;
+}

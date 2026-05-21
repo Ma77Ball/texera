@@ -32,6 +32,11 @@ import org.apache.texera.amber.util.ObjectMapperUtils
 import org.apache.texera.auth.SessionUser
 import org.apache.texera.dao.SqlServer
 import org.apache.texera.web.auth.JwtAuth.setupJwtAuth
+import org.apache.texera.web.observability.{
+  ExecutionLogsResource,
+  OpenSearchConfig,
+  OpenSearchLogsClient
+}
 import org.apache.texera.web.resource._
 import org.apache.texera.web.resource.auth.{AuthResource, GoogleAuthResource}
 import org.apache.texera.web.resource.dashboard.DashboardResource
@@ -154,6 +159,12 @@ class TexeraWebApplication
     environment.jersey.register(classOf[ProjectResource])
     environment.jersey.register(classOf[ProjectAccessResource])
     environment.jersey.register(classOf[WorkflowExecutionsResource])
+    // Read-only proxy for the OpenSearch logs index. Stays registered even
+    // if the backend is unreachable — the resource itself returns 502 if so,
+    // so a missing observability stack never blocks the rest of the API.
+    environment.jersey.register(
+      new ExecutionLogsResource(new OpenSearchLogsClient(OpenSearchConfig.fromEnv()))
+    )
     environment.jersey.register(classOf[DashboardResource])
     environment.jersey.register(classOf[GmailResource])
     environment.jersey.register(classOf[AdminExecutionResource])
