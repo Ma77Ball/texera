@@ -26,6 +26,7 @@ import io.dropwizard.core.setup.{Bootstrap, Environment}
 import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.amber.util.ObjectMapperUtils
 import org.apache.texera.dao.SqlServer
+import org.apache.texera.observability.OtelInit
 import org.apache.texera.service.resource.{HealthCheckResource, WorkflowCompilationResource}
 import org.eclipse.jetty.servlet.FilterHolder
 
@@ -48,6 +49,8 @@ class WorkflowCompilingService extends Application[WorkflowCompilingServiceConfi
       configuration: WorkflowCompilingServiceConfiguration,
       environment: Environment
   ): Unit = {
+    OtelInit.init("workflow-compiling-service")
+
     ObjectMapperUtils.warmupObjectMapperForOperatorsSerde()
 
     // serve backend at /api

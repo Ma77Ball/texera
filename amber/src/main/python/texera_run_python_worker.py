@@ -18,6 +18,7 @@
 import sys
 from loguru import logger
 
+from core.observability import otel_init
 from core.python_worker import PythonWorker
 from core.storage.storage_config import StorageConfig
 
@@ -61,6 +62,7 @@ if __name__ == "__main__":
         s3_auth_password,
     ) = sys.argv
     init_loguru_logger(logger_level)
+    otel_init.init(service_name="pyamber")
     StorageConfig.initialize(
         iceberg_catalog_type,
         iceberg_postgres_catalog_uri_without_scheme,

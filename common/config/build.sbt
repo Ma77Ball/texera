@@ -50,5 +50,13 @@ Compile / scalacOptions ++= Seq(
 
 // Core Dependencies
 libraryDependencies ++= Seq(
-  "com.typesafe" % "config" % "1.4.6" // For configuration management
+  "com.typesafe" % "config" % "1.4.6", // For configuration management
+  "com.typesafe.scala-logging" %% "scala-logging" % "3.9.5", // for LazyLogging in OtelInit
+  // OpenTelemetry — Apache 2.0. Default-disabled at runtime; see OtelInit.
+  "io.opentelemetry" % "opentelemetry-api" % "1.42.1",
+  "io.opentelemetry" % "opentelemetry-sdk" % "1.42.1",
+  "io.opentelemetry" % "opentelemetry-exporter-otlp" % "1.42.1",
+  "io.opentelemetry" % "opentelemetry-sdk-extension-autoconfigure" % "1.42.1",
+  "io.opentelemetry" % "opentelemetry-sdk-testing" % "1.42.1" % Test,
+  "org.scalatest" %% "scalatest" % "3.2.17" % Test
 )

@@ -30,6 +30,7 @@ import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.amber.core.storage.util.LakeFSStorageClient
 import org.apache.texera.auth.{JwtAuthFilter, RequestLoggingFilter, SessionUser}
 import org.apache.texera.dao.SqlServer
+import org.apache.texera.observability.OtelInit
 import org.apache.texera.service.`type`.DatasetFileNode
 import org.apache.texera.service.`type`.serde.DatasetFileNodeSerializer
 import org.apache.texera.service.resource.{
@@ -61,6 +62,8 @@ class FileService extends Application[FileServiceConfiguration] with LazyLogging
   }
 
   override def run(configuration: FileServiceConfiguration, environment: Environment): Unit = {
+    OtelInit.init("file-service")
+
     // Serve backend at /api
     environment.jersey.setUrlPattern("/api/*")
     SqlServer.initConnection(

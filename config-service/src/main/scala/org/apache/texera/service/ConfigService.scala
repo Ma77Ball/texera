@@ -29,6 +29,7 @@ import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.auth.{JwtAuthFilter, RequestLoggingFilter, SessionUser}
 import org.apache.texera.config.DefaultsConfig
 import org.apache.texera.dao.SqlServer
+import org.apache.texera.observability.OtelInit
 import org.apache.texera.service.resource.{ConfigResource, HealthCheckResource}
 import org.eclipse.jetty.server.session.SessionHandler
 import org.jooq.impl.DSL
@@ -55,6 +56,8 @@ class ConfigService extends Application[ConfigServiceConfiguration] with LazyLog
   }
 
   override def run(configuration: ConfigServiceConfiguration, environment: Environment): Unit = {
+    OtelInit.init("config-service")
+
     // Serve backend at /api
     environment.jersey.setUrlPattern("/api/*")
 

@@ -27,6 +27,7 @@ import io.dropwizard.core.setup.{Bootstrap, Environment}
 import org.apache.texera.amber.config.StorageConfig
 import org.apache.texera.auth.{JwtAuthFilter, RequestLoggingFilter, SessionUser}
 import org.apache.texera.dao.SqlServer
+import org.apache.texera.observability.OtelInit
 import org.apache.texera.service.resource.{
   ComputingUnitAccessResource,
   ComputingUnitManagingResource,
@@ -53,6 +54,8 @@ class ComputingUnitManagingService extends Application[ComputingUnitManagingServ
       configuration: ComputingUnitManagingServiceConfiguration,
       environment: Environment
   ): Unit = {
+    OtelInit.init("computing-unit-managing-service")
+
     SqlServer.initConnection(
       StorageConfig.jdbcUrl,
       StorageConfig.jdbcUsername,
