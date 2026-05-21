@@ -32,6 +32,7 @@ import org.apache.texera.amber.util.ObjectMapperUtils
 import org.apache.texera.auth.SessionUser
 import org.apache.texera.dao.SqlServer
 import org.apache.texera.web.auth.JwtAuth.setupJwtAuth
+import org.apache.texera.web.observability.{PrometheusClient, PrometheusConfig, StatsResource}
 import org.apache.texera.web.resource._
 import org.apache.texera.web.resource.auth.{AuthResource, GoogleAuthResource}
 import org.apache.texera.web.resource.dashboard.DashboardResource
@@ -160,6 +161,12 @@ class TexeraWebApplication
     environment.jersey.register(classOf[UserQuotaResource])
     environment.jersey.register(classOf[AdminSettingsResource])
     environment.jersey.register(classOf[AIAssistantResource])
+    // Read-only proxy for the Prometheus query API. The resource itself
+    // returns 502 if Prometheus is unreachable, so a missing observability
+    // stack never blocks the rest of the API.
+    environment.jersey.register(
+      new StatsResource(new PrometheusClient(PrometheusConfig.fromEnv()))
+    )
 
     AuthResource.createAdminUser()
 

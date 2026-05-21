@@ -1,0 +1,70 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+.workflow-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+}
+
+.workflow-stats-tiles {
+  display: flex;
+  gap: 12px;
+}
+
+.tile {
+  flex: 1;
+  padding: 12px 16px;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+}
+
+.tile-label {
+  font-size: 12px;
+  color: #666;
+}
+
+.tile-value {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.workflow-stats-loading,
+.workflow-stats-empty {
+  color: #666;
+  text-align: center;
+  padding: 24px;
+}
+
+.workflow-stats-error {
+  padding: 8px 12px;
+  background: #ffe6e6;
+  color: #a40000;
+  border-radius: 4px;
+}
+
+.workflow-stats-chart .bar {
+  fill: #1d70b8;
+}
+
+.workflow-stats-chart .bar-label {
+  font-size: 10px;
+  fill: #666;
+}
