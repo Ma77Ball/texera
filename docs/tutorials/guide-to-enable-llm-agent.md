@@ -3,12 +3,12 @@ title: "Guide to enable the LLM‐based Texera agent"
 weight: 40
 ---
 
-This guide explains how to enable the AI agent feature in Texera. For detailed explanation about this feature, see https://github.com/apache/texera/pull/4020.
+This guide explains how to enable the AI agent feature in Texera. For detailed explanation about this feature, see https://github.com/apache/texera/pull/4417.
 
 ## Prerequisites
 - Already know how to setup Texera
 - Python 3.10+
-- API key from a supported LLM provider (e.g., Anthropic, OpenAI)
+- [bun](https://bun.com/) 1.3.13
 
 ## Step 1: Install LiteLLM
 
@@ -84,13 +84,26 @@ export LITELLM_BASE_URL=http://your-litellm-host:4000
 export LITELLM_MASTER_KEY=your-master-key
 ```
 
+## Step 5: Start `AgentService`
+
+Texera manages the LLM agents using a dedicated micro service called `agent-service`. 
+
+To start it, first install the dependencies of `agent-service` by:
+```shell
+cd agent-service
+bun install
+```
+
+Then run the agent service by:
+```
+bun run dev
+```
+
 ## Step 6: Start Texera Services
 
-Start the **all** Texera micro services, including the `AccessControlService`.
+Start the **all** Texera micro services.
 
 ## Done!
 
 After opening any workflow, you should now see a robot icon at the bottom right. Click on it will expand a panel with all the available models:
 ![2025-11-25 18 34 39](/images/github-assets/c0fe6d8d-76ef-4761-9f4f-e23ebc2429fe.png)
-
-

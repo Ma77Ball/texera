@@ -7,7 +7,7 @@ This Document is aim to provide a instruction on how to setup the local developm
 
 ## Prerequisite
 
-This document requires you to finish all the setup of Texera local development environment described in `https://github.com/Texera/texera/wiki`.
+This document requires you to finish all the setup of Texera local development environment described in the [Guide for Developers](/docs/contribution-guidelines/guide-for-developers/).
 
 ## What is `micro-services`?
 
@@ -47,12 +47,3 @@ Once you open it, Intellij will auto-detect the sbt setting and start to load th
 
 
 2. Run `sbt clean compile` command in folder `core/micro-services`. This command will compile everything under `micro-services` and generate proto-specified codes.
-
-
-
-
-
-
-
-
-

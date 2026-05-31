@@ -3,7 +3,6 @@ title: "Guide to Implement a Java Native Operator"
 weight: 40
 ---
 
-
 In this page, we'll explain the basic concepts in Texera and use examples to show how to implement an operator.
 
 ### Code structure of every operator:
@@ -279,5 +278,3 @@ Texera's backend is responsible for determining the UI information to the fronte
 
 ### Registration and icon
 In the file `amber/src/main/scala/edu/uci/ics/texera/workflow/common/operators/LogicalOp.scala`, you will find a list of all registered operators, complete with their descriptor classes and names. After adding an operator's information, you can assign an icon to it. All operator icons are stored in the `/core/new-gui/src/assets/operator_images` directory. It's essential to ensure that the icon filename matches its respective operator descriptor name.
-
-

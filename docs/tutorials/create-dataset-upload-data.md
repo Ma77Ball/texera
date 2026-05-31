@@ -32,4 +32,3 @@ We will first be creating a dataset and uploading the sales data to it. Then we 
 
  * Drag and drop a `Aggregate` operator to get the average sold units group by `Item Type`
 ![2024-03-05 22 53 06](/images/github-assets/67ade74c-df20-44b1-a9fa-1b8edb4af0cf.png)
-

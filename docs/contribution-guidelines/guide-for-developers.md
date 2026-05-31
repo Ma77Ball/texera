@@ -3,18 +3,24 @@ title: "Guide for Developers"
 weight: 20
 ---
 
+<details>
+
+<summary>
+
 ## 0. Requirements
 
-#### **Java 11 JDK**
+</summary>
 
-Install `Java JDK 11 (Java Development Kit)` (recommend: `[adoptopenjdk](https://adoptium.net/installation/)`). To verify the installation, run:
+#### **JDK 17**
+
+Install `Java JDK 17 (Java Development Kit)`. We recommend you to use [sdkman](https://sdkman.io/install) to install Java 17. To verify the installation, run:
 ```console
 java -version
 ```
 
 Next, set `JAVA_HOME`. On macOS you can run:
 ```
-export JAVA_HOME=$(/usr/libexec/java_home -v 11)
+export JAVA_HOME=$(/usr/libexec/java_home -v 17)
 ```
 On Windows, add a system environment variable called `JAVA_HOME` that points to the JDK directory.
 
@@ -44,9 +50,9 @@ sbt --version
 
 If the above command fails on Windows after installation, it is recommended to restart your computer.
 
-#### **node LTS Version > 18.x**
+#### **node LTS Version > 24.x**
 
-Install an LTS version (not the latest) of `node`. Currently, we require LTS version > 18.x. 
+Install an LTS version (not the latest) of `node`. Currently, we require LTS version > 24.x. 
 
 On Windows, install from [https://nodejs.org/en/](https://nodejs.org/en/).
 
@@ -57,11 +63,11 @@ Verify the installation by:
 node -v
 ```
 
-#### **Angular 16 Cli**
+#### **Angular 21 Cli**
 
-Install the angular 16 cli globally:
+Install the angular 21 cli globally:
 ```console
-npm install -g @angular/cli@16
+npm install -g @angular/cli@21
 ```
 
 Verify the installation by:
@@ -69,6 +75,8 @@ Verify the installation by:
 ng version
 ```
 </details>
+
+<details>
 
 <summary>
 
@@ -80,7 +88,7 @@ ng version
 
 In the terminal, clone the Texera repo:
 ```console
-git clone git@github.com:Texera/texera.git
+git clone git@github.com:apache/texera.git
 ```
 
 Do the following changes to the configuration files:
@@ -158,9 +166,9 @@ Before you import the project, you need to have "Scala", and "SBT Executor" plug
 3. In the next window, make sure `Project JDK` is set. Click OK. 
 4. IntelliJ should import and build this Scala project. In the terminal under `texera`, run:
 ```
-sbt clean protocGenerate
+sbt clean compile
 ```
-This will generate proto-specified codes. And the IntelliJ indexing should start. Wait until the indexing and importing is completed. And on the right, you can open the sbt tab and check the loaded `texera` project and couple of sub projects: 
+This will generate proto-specified codes and jooq code. And the IntelliJ indexing should start. Wait until the indexing and importing is completed. And on the right, you can open the sbt tab and check the loaded `texera` project and couple of sub projects: 
 
 <img width="616" height="859" alt="image" src="/images/github-assets/4e916543-a991-4e64-aa4f-b7775eb6b106.png" />
 
@@ -219,13 +227,12 @@ pip install -r amber/requirements.txt -r amber/operator-requirements.txt
 
 ## 2. Launch Frontend
 </summary>
-This is for developers that work on the frontend part of the project. This step is NOT needed if you develop the backend only.
+This is for developers that work on the frontend part of the project. Before you start, make sure the backend services are all running.
 
-Before you start, make sure the backend services are all running.
-
-### Install Angular CLI
+### Install Frontend Dependencies
 ```console
 cd frontend
+corepack enable
 yarn install
 ```
 
@@ -254,23 +261,30 @@ yarn run build
 This command will optimize the frontend code to make it run faster. This step will take a while. After that, start the backend engine in IntelliJ and use your browser to access `http://localhost:8080`.
 
 
+### Load example workflows and datasets
+
+By default, a default admin user (username `texera` and password `texera`) are created.
+
+To tryout Texera's core features of running workflows, upload example [datasets](https://github.com/apache/texera/tree/main/bin/single-node/examples/datasets) and [workflows](https://github.com/apache/texera/tree/main/bin/single-node/examples/workflows) to get started.
+
 </details>
 
 
 <details>
+
 <summary>
 
-## 3. Email Notification (Optional)
+## 3. Enable Texera Agent feature (Optional).
+
 </summary>
 
-1. Set `smtp` in `config/src/main/resources/user-system.conf`. You need an App password if the account has 2FA.
-2. Log in to Texera with an admin account.
-3. Open the Gmail dashboard under the admin tab.
-5. Send a test email.
+Texera Agent is a LLM-based AI agent that can help end users construct workflows using natural language. To enable it, 
+see [Guide to enable Texera Agent](/docs/tutorials/guide-to-enable-llm-agent/)
 
 </details>
 
 <details>
+
 <summary>
 
 ## 4. Misc
@@ -280,16 +294,16 @@ This command will optimize the frontend code to make it run faster. This step wi
 This part is optional; you only need to do this if you are working on a specific task.
 
 ### To create a new database table and write queries using Java through Jooq
-1. Create the needed new table in MySQL and update `sql/texera_ddl.sql` to include the new table.
-2. Run `sbt DAO/jooqGenerate` to generate the classes for the new table.
+1. Create the needed new table in PostgreSQL and update `sql/texera_ddl.sql` to include the new table.
+2. Run `sbt jooqGenerate` at the project root to generate the classes for the new table.
 
 Note: Jooq creates DAO for simple operations if the requested SQL query is complex, then the developer can use the generated Table classes to implement the operation
 
 ### Disable password login
-Edit `config/src/main/resources/gui.conf`, change `local-login` to `false`.
+Edit `common/config/src/main/resources/gui.conf`, change `local-login` to `false`.
 
 ### Enforce invite only
-Edit `config/src/main/resources/user-system.conf`, change `invite-only` to `true`.
+Edit `common/config/src/main/resources/user-system.conf`, change `invite-only` to `true`.
 
 ### Backend endpoints Role Annotation
 There are two types of permissions for the backend endpoints:
@@ -318,6 +332,12 @@ Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name
 ```
 
 > If you cannot change this policy (e.g., on managed devices), keep your workspace path short (e.g., `C:\src\texera`) to reduce overall path length.
+
+### Enable Email Notification
+1. Set `smtp` in `common/config/src/main/resources/user-system.conf`. You need an App password if the account has 2FA.
+2. Log in to Texera with an admin account.
+3. Open the Gmail dashboard under the admin tab.
+5. Send a test email.
 
 ### **Windows: Fix `HADOOP_HOME` errors**
 

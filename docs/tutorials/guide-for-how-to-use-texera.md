@@ -43,4 +43,3 @@ This is Texera's dashboard page. On the left navigation bar, you can switch betw
 4. **Result Panel**:
 
    By default or when there is no result, it is hidden. You can click on the little UP arrow to expand this panel. When a workflow is finished running, the result panel will pop up with the data. You may slide up and down or left and right to view the data inside the panel.  
-
