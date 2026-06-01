@@ -1,0 +1,207 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Keeps the website's documentation in sync with this repository, which is the
+# single source of truth for docs (issue #5001). On any change under docs/ on
+# main, the codebase docs/ tree is synced into the website's
+# content/docs/latest/ tree and pushed directly to the website's main branch,
+# which triggers the site's own "Build & Publish Hugo site" workflow.
+#
+# Sync is one-directional (codebase -> site). The website's docs are generated;
+# edit docs in this repository, not on the site.
+#
+# Requires a repository secret SITE_SYNC_TOKEN: a fine-grained PAT (or
+# GitHub App installation token) with Contents: write on
+# apache/incubator-texera-site. The default GITHUB_TOKEN cannot push to another
+# repository.
+
+name: Sync docs to website
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+  workflow_dispatch:
+
+# Serialize syncs so concurrent doc merges don't race each other's push.
+concurrency:
+  group: sync-docs-to-site
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    # Only run on the canonical upstream repository, never on forks.
+    if: github.repository == 'apache/texera'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout texera (source of truth)
+        uses: actions/checkout@v5
+        with:
+          path: texera
+
+      - name: Checkout incubator-texera-site (sync target)
+        uses: actions/checkout@v5
+        with:
+          repository: apache/incubator-texera-site
+          ref: main
+          path: site
+          fetch-depth: 0
+          token: ${{ secrets.SITE_SYNC_TOKEN }}
+
+      - name: Sync docs/ into content/docs/latest/
+        env:
+          SOURCE_DOCS: texera/docs
+          TARGET_DOCS: site/content/docs/latest
+        # The codebase docs/ folder owns the *content* (the Markdown body). The
+        # website pages additionally carry site-only front matter that does NOT
+        # exist in the codebase and must be preserved on every sync: `aliases`
+        # (hand-maintained redirects from old URLs) and `menu`/`linkTitle`
+        # (Hugo navigation hooks, e.g. on _index.md). So for every page the
+        # rule is: keep the target's existing front matter, replace its body
+        # with the source body. New pages are copied as-is; Markdown files no
+        # longer in the source are deleted so the site stays a faithful mirror.
+        # Only *.md participates -- non-Markdown assets in docs/ (e.g.
+        # system-screenshot.png, which the repo README references) are left
+        # alone; website images live under the site's static/ tree.
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import sys
+
+          source = pathlib.Path(os.environ["SOURCE_DOCS"])
+          target = pathlib.Path(os.environ["TARGET_DOCS"])
+
+
+          def split_front_matter(text):
+              """Return (front_matter, body). front_matter is the leading
+              '---\\n...\\n---\\n' block (empty if none); body is the rest."""
+              if not text.startswith("---\n"):
+                  return "", text
+              lines = text.split("\n")
+              for i in range(1, len(lines)):
+                  if lines[i] == "---":
+                      return "\n".join(lines[: i + 1]) + "\n", "\n".join(lines[i + 1 :])
+              # Unterminated front matter: keep whole file as body, lose nothing.
+              return "", text
+
+
+          def normalize_body(body):
+              """Drop leading blank lines and trailing whitespace. '' for an
+              empty body (stub pages that carry only front matter)."""
+              body = body.lstrip("\n").rstrip()
+              return body + "\n" if body else ""
+
+
+          if not source.is_dir():
+              print(f"error: source dir not found: {source}", file=sys.stderr)
+              sys.exit(2)
+          target.mkdir(parents=True, exist_ok=True)
+
+          source_rels = set()
+          created = updated = deleted = 0
+
+          for sfile in sorted(source.rglob("*.md")):
+              rel = sfile.relative_to(source)
+              source_rels.add(rel)
+              tfile = target / rel
+
+              src_text = sfile.read_text(encoding="utf-8")
+              _, src_body = split_front_matter(src_text)
+
+              if tfile.exists():
+                  target_fm, _ = split_front_matter(tfile.read_text(encoding="utf-8"))
+              else:
+                  target_fm, _ = split_front_matter(src_text)
+
+              body = normalize_body(src_body)
+              if body:
+                  new_text = target_fm + ("\n" if target_fm else "") + body
+              else:
+                  new_text = target_fm
+
+              existed = tfile.exists()
+              if not existed or tfile.read_text(encoding="utf-8") != new_text:
+                  tfile.parent.mkdir(parents=True, exist_ok=True)
+                  tfile.write_text(new_text, encoding="utf-8")
+                  if existed:
+                      updated += 1
+                      print(f"  update  {rel}")
+                  else:
+                      created += 1
+                      print(f"  create  {rel}")
+
+          for tfile in sorted(target.rglob("*.md")):
+              rel = tfile.relative_to(target)
+              if rel not in source_rels:
+                  tfile.unlink()
+                  deleted += 1
+                  print(f"  delete  {rel}")
+
+          print(f"Sync complete: {created} created, {updated} updated, {deleted} deleted.")
+          PY
+
+      - name: Commit and push to website
+        working-directory: site
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A content/docs/latest
+          if git diff --cached --quiet; then
+            echo "No documentation changes to sync."
+            exit 0
+          fi
+
+          short_sha="${SOURCE_SHA::7}"
+          git commit \
+            -m "docs: sync from ${SOURCE_REPO}@${short_sha}" \
+            -m "Automated sync of docs/ -> content/docs/latest/ from ${SOURCE_REPO}." \
+            -m "Source commit: ${SOURCE_SHA}" \
+            -m "Workflow run: ${RUN_URL}"
+
+          # Push with retry. A non-fast-forward means main advanced underneath
+          # us (a manual edit or a racing sync); refresh and replay our single
+          # sync commit on top before retrying.
+          attempts=5
+          backoffs=(0 5 15 30 60)
+          for i in $(seq 0 $((attempts - 1))); do
+            if [[ "${backoffs[i]}" -gt 0 ]]; then
+              echo "Push attempt $((i + 1))/${attempts}: sleeping ${backoffs[i]}s"
+              sleep "${backoffs[i]}"
+            fi
+            if git push origin HEAD:main 2>&1; then
+              echo "Pushed synced docs to incubator-texera-site main."
+              exit 0
+            fi
+            echo "Push failed; refreshing origin/main and rebasing before retry."
+            git fetch --no-tags origin main
+            git rebase origin/main
+          done
+
+          echo "::error::Failed to push synced docs after ${attempts} attempts."
+          exit 1
