@@ -181,7 +181,7 @@ jobs:
       JVM_OPTS: -Xms2048M -Xmx2048M -Xss6M -XX:ReservedCodeCacheSize=256M -Dfile.encoding=UTF-8
     services:
       postgres:
-        image: postgres
+        image: postgres:15
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -313,7 +313,7 @@ jobs:
       JVM_OPTS: -Xms2048M -Xmx2048M -Xss6M -XX:ReservedCodeCacheSize=256M -Dfile.encoding=UTF-8
     services:
       postgres:
-        image: postgres
+        image: postgres:15
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -547,7 +547,7 @@ jobs:
       # Each platform service transitively depends on DAO, which runs JOOQ
       # code generation at compile time and needs the live texera schema.
       postgres:
-        image: postgres
+        image: postgres:15
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -633,7 +633,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     services:
       postgres:
-        image: postgres
+        image: postgres:15
         env:
           POSTGRES_PASSWORD: postgres
         ports:
