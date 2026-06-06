@@ -17,12 +17,12 @@
 
 from __future__ import annotations
 
-import sys
 from threading import RLock, Condition
 from typing import List, Optional, Generic, TypeVar, MutableMapping
 
 from core.util.customized_queue.inner import inner
 from core.util.customized_queue.queue_base import IKeyedQueue
+from core.util.customized_queue.size_estimation import estimate_in_mem_size
 from core.util.atomic import AtomicInteger
 
 K = TypeVar("K")
@@ -35,7 +35,7 @@ class LinkedBlockingMultiQueue(IKeyedQueue):
         def __init__(self, item: T):
             self.item = item
             self.next: Optional[LinkedBlockingMultiQueue.Node[T]] = None
-            self.in_mem_size = sys.getsizeof(item)
+            self.in_mem_size = estimate_in_mem_size(item)
 
     @inner
     class SubQueue(Generic[T]):

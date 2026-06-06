@@ -49,12 +49,20 @@ message TupleMetrics {
   int64 size = 2;
 }
 
+// Backpressure on one input port: bytes queued vs. max credit allowed.
+message PortBackpressureMetrics {
+  core.PortIdentity port_id = 1 [(scalapb.field).no_box = true];
+  int64 queued_credit = 2;
+  int64 max_credit = 3;
+}
+
 message WorkerStatistics {
   repeated PortTupleMetricsMapping input_tuple_metrics = 1;
   repeated PortTupleMetricsMapping output_tuple_metrics = 2;
   int64 data_processing_time = 3;
   int64 control_processing_time = 4;
   int64 idle_time = 5;
+  repeated PortBackpressureMetrics input_backpressure_metrics = 6;
 }
 
 message WorkerMetrics {
