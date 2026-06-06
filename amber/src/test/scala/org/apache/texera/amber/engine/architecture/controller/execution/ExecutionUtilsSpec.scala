@@ -22,6 +22,7 @@ package org.apache.texera.amber.engine.architecture.controller.execution
 import org.apache.texera.amber.core.workflow.PortIdentity
 import org.apache.texera.amber.engine.architecture.rpc.controlreturns.WorkflowAggregatedState
 import org.apache.texera.amber.engine.architecture.worker.statistics.{
+  PortBackpressureMetrics,
   PortTupleMetricsMapping,
   TupleMetrics
 }
@@ -336,5 +337,79 @@ class ExecutionUtilsSpec extends AnyFlatSpec {
     assert(result.operatorStatistics.outputMetrics.isEmpty)
     assert(result.operatorStatistics.numWorkers == 3)
     assert(result.operatorStatistics.dataProcessingTime == 12)
+  }
+
+  // -- aggregateBackpressureMetrics ---------------------------------------
+
+  "ExecutionUtils.aggregateBackpressureMetrics" should "return empty when given none" in {
+    assert(ExecutionUtils.aggregateBackpressureMetrics(Iterable.empty).isEmpty)
+  }
+
+  it should "preserve a single port's metrics" in {
+    val m = PortBackpressureMetrics(PortIdentity(0), queuedCredit = 100, maxCredit = 1000)
+    assert(ExecutionUtils.aggregateBackpressureMetrics(List(m)) == Seq(m))
+  }
+
+  it should "sum queued and max credit across workers on the same port" in {
+    val portId = PortIdentity(0)
+    val a = PortBackpressureMetrics(portId, 100, 1000)
+    val b = PortBackpressureMetrics(portId, 250, 1000)
+    assert(
+      ExecutionUtils.aggregateBackpressureMetrics(List(a, b)) ==
+        Seq(PortBackpressureMetrics(portId, 350, 2000))
+    )
+  }
+
+  it should "group independently per port" in {
+    val a = PortBackpressureMetrics(PortIdentity(0), 100, 1000)
+    val b = PortBackpressureMetrics(PortIdentity(1), 200, 1000)
+    assert(ExecutionUtils.aggregateBackpressureMetrics(List(a, b)).toSet == Set(a, b))
+  }
+
+  it should "saturate at Long.MaxValue instead of overflowing" in {
+    val portId = PortIdentity(0)
+    val a = PortBackpressureMetrics(portId, Long.MaxValue, Long.MaxValue)
+    val b = PortBackpressureMetrics(portId, 1, 1)
+    val result = ExecutionUtils.aggregateBackpressureMetrics(List(a, b)).head
+    assert(result.queuedCredit == Long.MaxValue)
+    assert(result.maxCredit == Long.MaxValue)
+  }
+
+  it should "preserve a zero-pressure entry rather than dropping it" in {
+    val m = PortBackpressureMetrics(PortIdentity(0), 0, 1000)
+    assert(ExecutionUtils.aggregateBackpressureMetrics(List(m)) == Seq(m))
+  }
+
+  it should "carry aggregated backpressure through aggregateMetrics" in {
+    val portId = PortIdentity(0)
+    val left = OperatorMetrics(
+      WorkflowAggregatedState.RUNNING,
+      OperatorStatistics(
+        Seq.empty,
+        Seq.empty,
+        1,
+        0,
+        0,
+        0,
+        Seq(PortBackpressureMetrics(portId, 100, 1000))
+      )
+    )
+    val right = OperatorMetrics(
+      WorkflowAggregatedState.RUNNING,
+      OperatorStatistics(
+        Seq.empty,
+        Seq.empty,
+        1,
+        0,
+        0,
+        0,
+        Seq(PortBackpressureMetrics(portId, 200, 1000))
+      )
+    )
+    val result = ExecutionUtils.aggregateMetrics(List(left, right))
+    assert(
+      result.operatorStatistics.inputBackpressureMetrics ==
+        Seq(PortBackpressureMetrics(portId, 300, 2000))
+    )
   }
 }

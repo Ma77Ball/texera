@@ -77,6 +77,8 @@ message OperatorStatistics{
   int64 data_processing_time = 4;
   int64 control_processing_time = 5;
   int64 idle_time = 6;
+  // Per input-port backpressure, aggregated across the operator's workers.
+  repeated architecture.worker.PortBackpressureMetrics input_backpressure_metrics = 7;
 }
 
 message OperatorMetrics{

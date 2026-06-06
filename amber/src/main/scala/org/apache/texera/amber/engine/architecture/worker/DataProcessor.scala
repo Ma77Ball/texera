@@ -21,6 +21,7 @@ package org.apache.texera.amber.engine.architecture.worker
 
 import com.softwaremill.macwire.wire
 import io.grpc.MethodDescriptor
+import org.apache.texera.amber.config.ApplicationConfig
 import org.apache.texera.amber.core.executor.OperatorExecutor
 import org.apache.texera.amber.core.state.State
 import org.apache.texera.amber.core.tuple._
@@ -54,7 +55,10 @@ import org.apache.texera.amber.engine.architecture.worker.statistics.WorkerState
   READY,
   RUNNING
 }
-import org.apache.texera.amber.engine.architecture.worker.statistics.WorkerStatistics
+import org.apache.texera.amber.engine.architecture.worker.statistics.{
+  PortBackpressureMetrics,
+  WorkerStatistics
+}
 import org.apache.texera.amber.engine.common.ambermessage._
 import org.apache.texera.amber.engine.common.statetransition.WorkerStateManager
 import org.apache.texera.amber.engine.common.virtualidentity.util.CONTROLLER
@@ -95,7 +99,26 @@ class DataProcessor(
     * provide API for actor to get stats of this operator
     */
   def collectStatistics(): WorkerStatistics =
-    statisticsManager.getStatistics(executor)
+    statisticsManager.getStatistics(executor, collectInputBackpressure())
+
+  /**
+    * Per input-port backpressure: bytes queued in the receiver-side FIFOs vs.
+    * the total credit allowed, summed over the channels feeding each port.
+    */
+  private def collectInputBackpressure(): Seq[PortBackpressureMetrics] = {
+    val maxCredit = ApplicationConfig.maxCreditAllowedInBytesPerChannel
+    inputGateway.getAllDataChannels
+      .flatMap(channel => channel.getPortIdOpt.map(portId => (portId, channel.getQueuedCredit)))
+      .toSeq
+      .groupBy(_._1)
+      .map {
+        case (portId, entries) =>
+          val portMax =
+            if (maxCredit == Long.MaxValue) Long.MaxValue else maxCredit * entries.size
+          PortBackpressureMetrics(portId, entries.map(_._2).sum, portMax)
+      }
+      .toSeq
+  }
 
   /**
     * process currentInputTuple through executor logic.

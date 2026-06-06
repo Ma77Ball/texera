@@ -139,6 +139,13 @@ const operatorWorkerCountClass = "operator-worker-count";
 
 export const linkPathStrokeColor = "#919191";
 
+// Backpressure (edge congestion) severity thresholds on utilization in [0,1].
+export const backpressureMedThreshold = 0.5;
+export const backpressureHighThreshold = 0.8;
+export const backpressureLowColor = "#2ecc71"; // green
+export const backpressureMedColor = "#f39c12"; // orange
+export const backpressureHighColor = "#e74c3c"; // red
+
 /**
  * Extends a basic Joint operator element and adds our own HTML markup.
  * Our own HTML markup includes the SVG element for the delete button,
@@ -412,6 +419,83 @@ export class JointUIService {
     });
     this.changeOperatorState(jointPaper, operatorID, statistics.operatorState);
   }
+
+  /**
+   * Styles a link to reflect backpressure on the edge: stroke color by severity
+   * plus a compact "<size> (<pct>%)" label. utilization is in [0,1].
+   */
+  public changeLinkBackpressure(
+    jointPaper: joint.dia.Paper,
+    linkID: string,
+    utilization: number,
+    queuedBytes: number
+  ): void {
+    const link = jointPaper.getModelById(linkID) as joint.dia.Link;
+    if (!link) {
+      return;
+    }
+    const color = JointUIService.getBackpressureColor(utilization);
+    link.attr(".connection/stroke", color);
+    link.attr(".connection/stroke-width", utilization > 0 ? "3px" : "2px");
+    if (queuedBytes > 0) {
+      link.labels([
+        {
+          position: 0.5,
+          attrs: {
+            text: {
+              text: `${JointUIService.formatBytes(queuedBytes)} (${Math.round(utilization * 100)}%)`,
+              fill: color,
+              "font-size": "10px",
+            },
+            rect: { fill: "white", stroke: color, "stroke-width": 1, rx: 3, ry: 3 },
+          },
+        },
+      ]);
+    } else {
+      link.labels([]);
+    }
+  }
+
+  /** Restores a link to its default (uncongested) appearance. */
+  public resetLinkBackpressure(jointPaper: joint.dia.Paper, linkID: string): void {
+    const link = jointPaper.getModelById(linkID) as joint.dia.Link;
+    if (!link) {
+      return;
+    }
+    link.attr(".connection/stroke", linkPathStrokeColor);
+    link.attr(".connection/stroke-width", "2px");
+    link.labels([]);
+  }
+
+  /** Maps a backpressure utilization in [0,1] to a severity color. */
+  public static getBackpressureColor(utilization: number): string {
+    if (utilization >= backpressureHighThreshold) {
+      return backpressureHighColor;
+    }
+    if (utilization >= backpressureMedThreshold) {
+      return backpressureMedColor;
+    }
+    if (utilization > 0) {
+      return backpressureLowColor;
+    }
+    return linkPathStrokeColor;
+  }
+
+  /** Formats a byte count into a compact human-readable string. */
+  public static formatBytes(bytes: number): string {
+    if (bytes < 1024) {
+      return `${bytes} B`;
+    }
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = bytes / 1024;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex++;
+    }
+    return `${value.toFixed(1)} ${units[unitIndex]}`;
+  }
+
   public foldOperatorDetails(jointPaper: joint.dia.Paper, operatorID: string): void {
     jointPaper.getModelById(operatorID).attr({
       [`.${operatorStateClass}`]: { visibility: "hidden" },

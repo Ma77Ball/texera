@@ -112,6 +112,16 @@ class ExecutionStatsService(
               val outMap = metrics.operatorStatistics.outputMetrics
                 .map(pm => pm.portId.id.toString -> pm.tupleMetrics.count)
                 .toMap
+              val backpressureUtilMap = metrics.operatorStatistics.inputBackpressureMetrics
+                .map(bp =>
+                  bp.portId.id.toString ->
+                    (if (bp.maxCredit <= 0) 0.0
+                     else math.min(1.0, bp.queuedCredit.toDouble / bp.maxCredit.toDouble))
+                )
+                .toMap
+              val queuedBytesMap = metrics.operatorStatistics.inputBackpressureMetrics
+                .map(bp => bp.portId.id.toString -> bp.queuedCredit)
+                .toMap
 
               val res = OperatorAggregatedMetrics(
                 Utils.aggregatedStateToString(metrics.operatorState),
@@ -124,7 +134,9 @@ class ExecutionStatsService(
                 metrics.operatorStatistics.numWorkers,
                 metrics.operatorStatistics.dataProcessingTime,
                 metrics.operatorStatistics.controlProcessingTime,
-                metrics.operatorStatistics.idleTime
+                metrics.operatorStatistics.idleTime,
+                backpressureUtilMap,
+                queuedBytesMap
               )
               (x._1, res)
           })

@@ -86,6 +86,10 @@ export interface OperatorStatistics
     aggregatedOutputRowCount: number;
     outputPortMetrics: Record<string, number>;
     numWorkers?: number;
+    // Per input-port backpressure, keyed by numeric port id.
+    // utilization in [0,1]; queued bytes for the edge label.
+    inputPortBackpressure?: Record<string, number>;
+    inputPortQueuedBytes?: Record<string, number>;
   }> {}
 
 export interface OperatorStatsUpdate

@@ -21,6 +21,7 @@ package org.apache.texera.amber.engine.architecture.controller.execution
 
 import org.apache.texera.amber.engine.architecture.rpc.controlreturns.WorkflowAggregatedState
 import org.apache.texera.amber.engine.architecture.worker.statistics.{
+  PortBackpressureMetrics,
   PortTupleMetricsMapping,
   TupleMetrics
 }
@@ -67,6 +68,9 @@ object ExecutionUtils {
     val dataProcessingTimeSum = metrics.map(_.operatorStatistics.dataProcessingTime).sum
     val controlProcessingTimeSum = metrics.map(_.operatorStatistics.controlProcessingTime).sum
     val idleTimeSum = metrics.map(_.operatorStatistics.idleTime).sum
+    val backpressureSum = aggregateBackpressureMetrics(
+      metrics.flatMap(_.operatorStatistics.inputBackpressureMetrics).filterNot(_.portId.internal)
+    )
 
     OperatorMetrics(
       aggregatedState,
@@ -76,7 +80,8 @@ object ExecutionUtils {
         numWorkersSum,
         dataProcessingTimeSum,
         controlProcessingTimeSum,
-        idleTimeSum
+        idleTimeSum,
+        backpressureSum
       )
     )
   }
@@ -120,6 +125,30 @@ object ExecutionUtils {
           val totalCount = mappings.map(_.tupleMetrics.count).sum
           val totalSize = mappings.map(_.tupleMetrics.size).sum
           PortTupleMetricsMapping(portId, TupleMetrics(totalCount, totalSize))
+      }
+      .toSeq
+  }
+
+  // Sum queued and max credit per input port across workers (saturating at Long.MaxValue).
+  def aggregateBackpressureMetrics(
+      metrics: Iterable[PortBackpressureMetrics]
+  ): Seq[PortBackpressureMetrics] = {
+    def saturatingSum(values: Iterable[Long]): Long =
+      values.foldLeft(0L) { (acc, v) =>
+        val sum = acc + v
+        if (sum < acc) Long.MaxValue else sum // overflow guard
+      }
+
+    metrics
+      .groupBy(_.portId)
+      .view
+      .map {
+        case (portId, mappings) =>
+          PortBackpressureMetrics(
+            portId,
+            saturatingSum(mappings.map(_.queuedCredit)),
+            saturatingSum(mappings.map(_.maxCredit))
+          )
       }
       .toSeq
   }

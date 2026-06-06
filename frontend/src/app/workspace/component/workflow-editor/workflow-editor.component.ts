@@ -334,6 +334,19 @@ export class WorkflowEditorComponent implements OnInit, AfterViewInit, OnDestroy
               this.isSink(op.operatorID)
             );
           });
+
+        // Color each edge by the backpressure on its target operator's input
+        // port (keyed by numeric port suffix, matching the backend stats keys).
+        this.workflowActionService
+          .getTexeraGraph()
+          .getAllLinks()
+          .forEach(link => {
+            const targetStats = status[link.target.operatorID];
+            const portSuffix = link.target.portID.split("-")[1] ?? link.target.portID;
+            const utilization = targetStats?.inputPortBackpressure?.[portSuffix] ?? 0;
+            const queuedBytes = targetStats?.inputPortQueuedBytes?.[portSuffix] ?? 0;
+            this.jointUIService.changeLinkBackpressure(this.paper, link.linkID, utilization, queuedBytes);
+          });
       });
 
     this.executeWorkflowService
@@ -357,6 +370,20 @@ export class WorkflowEditorComponent implements OnInit, AfterViewInit, OnDestroy
             .forEach(op => {
               this.jointUIService.changeOperatorState(this.paper, op.operatorID, operatorState);
             });
+        }
+
+        // Clear edge backpressure styling once execution is no longer active.
+        const activeStates = [
+          ExecutionState.Running,
+          ExecutionState.Pausing,
+          ExecutionState.Paused,
+          ExecutionState.Resuming,
+        ];
+        if (!activeStates.includes(event.current.state)) {
+          this.workflowActionService
+            .getTexeraGraph()
+            .getAllLinks()
+            .forEach(link => this.jointUIService.resetLinkBackpressure(this.paper, link.linkID));
         }
       });
 

@@ -30,7 +30,10 @@ case class OperatorAggregatedMetrics(
     numWorkers: Long,
     aggregatedDataProcessingTime: Long,
     aggregatedControlProcessingTime: Long,
-    aggregatedIdleTime: Long
+    aggregatedIdleTime: Long,
+    // Per input-port backpressure: utilization in [0,1] and queued bytes, keyed by port id.
+    inputPortBackpressure: Map[String, Double] = Map.empty,
+    inputPortQueuedBytes: Map[String, Long] = Map.empty
 )
 
 case class OperatorStatisticsUpdateEvent(operatorStatistics: Map[String, OperatorAggregatedMetrics])

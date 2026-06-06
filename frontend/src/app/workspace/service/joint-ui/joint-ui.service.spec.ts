@@ -19,7 +19,18 @@
 
 import { of } from "rxjs";
 import * as joint from "jointjs";
-import { JointUIService, operatorNameClass, operatorStateClass, operatorPortMetricsClass } from "./joint-ui.service";
+import {
+  JointUIService,
+  operatorNameClass,
+  operatorStateClass,
+  operatorPortMetricsClass,
+  linkPathStrokeColor,
+  backpressureLowColor,
+  backpressureMedColor,
+  backpressureHighColor,
+  backpressureMedThreshold,
+  backpressureHighThreshold,
+} from "./joint-ui.service";
 import { CommentBox, OperatorPredicate } from "../../types/workflow-common.interface";
 import { OperatorState } from "../../types/execute-workflow.interface";
 import { Coeditor } from "../../../common/type/user";
@@ -222,6 +233,37 @@ describe("JointUIService", () => {
     it("returns the default white fill for an enabled operator", () => {
       expect(JointUIService.getOperatorFillColor({} as OperatorPredicate)).toBe("#FFFFFF");
       expect(JointUIService.getOperatorFillColor({ isDisabled: false } as OperatorPredicate)).toBe("#FFFFFF");
+    });
+  });
+
+  describe("getBackpressureColor (static)", () => {
+    it("returns the default link color when there is no pressure", () => {
+      expect(JointUIService.getBackpressureColor(0)).toBe(linkPathStrokeColor);
+    });
+    it("returns green for low pressure", () => {
+      expect(JointUIService.getBackpressureColor(0.1)).toBe(backpressureLowColor);
+      expect(JointUIService.getBackpressureColor(backpressureMedThreshold - 0.01)).toBe(backpressureLowColor);
+    });
+    it("returns orange at and above the medium threshold", () => {
+      expect(JointUIService.getBackpressureColor(backpressureMedThreshold)).toBe(backpressureMedColor);
+      expect(JointUIService.getBackpressureColor(backpressureHighThreshold - 0.01)).toBe(backpressureMedColor);
+    });
+    it("returns red at and above the high threshold", () => {
+      expect(JointUIService.getBackpressureColor(backpressureHighThreshold)).toBe(backpressureHighColor);
+      expect(JointUIService.getBackpressureColor(1)).toBe(backpressureHighColor);
+    });
+  });
+
+  describe("formatBytes (static)", () => {
+    it("formats sub-kilobyte values as bytes", () => {
+      expect(JointUIService.formatBytes(0)).toBe("0 B");
+      expect(JointUIService.formatBytes(1023)).toBe("1023 B");
+    });
+    it("formats kilobytes, megabytes and gigabytes with one decimal", () => {
+      expect(JointUIService.formatBytes(1024)).toBe("1.0 KB");
+      expect(JointUIService.formatBytes(1536)).toBe("1.5 KB");
+      expect(JointUIService.formatBytes(1024 * 1024)).toBe("1.0 MB");
+      expect(JointUIService.formatBytes(1024 * 1024 * 1024)).toBe("1.0 GB");
     });
   });
 

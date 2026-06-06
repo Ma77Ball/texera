@@ -123,4 +123,6 @@ class AmberFIFOChannel(val channelId: ChannelIdentity) extends AmberLogging {
       )
     )
   }
+
+  def getPortIdOpt: Option[PortIdentity] = this.portId
 }

@@ -93,6 +93,7 @@ case class OperatorExecution() {
     val workerRawStats = workerExecutions.values.asScala.map(_.getStats)
     val inputMetrics = workerRawStats.flatMap(_.inputTupleMetrics)
     val outputMetrics = workerRawStats.flatMap(_.outputTupleMetrics)
+    val backpressureMetrics = workerRawStats.flatMap(_.inputBackpressureMetrics)
     OperatorMetrics(
       getState,
       OperatorStatistics(
@@ -101,7 +102,8 @@ case class OperatorExecution() {
         getWorkerIds.size,
         dataProcessingTime = workerRawStats.map(_.dataProcessingTime).sum,
         controlProcessingTime = workerRawStats.map(_.controlProcessingTime).sum,
-        idleTime = workerRawStats.map(_.idleTime).sum
+        idleTime = workerRawStats.map(_.idleTime).sum,
+        inputBackpressureMetrics = ExecutionUtils.aggregateBackpressureMetrics(backpressureMetrics)
       )
     )
   }

@@ -22,6 +22,7 @@ package org.apache.texera.amber.engine.architecture.worker.managers
 import org.apache.texera.amber.core.executor.OperatorExecutor
 import org.apache.texera.amber.core.workflow.PortIdentity
 import org.apache.texera.amber.engine.architecture.worker.statistics.{
+  PortBackpressureMetrics,
   PortTupleMetricsMapping,
   TupleMetrics,
   WorkerStatistics
@@ -46,9 +47,13 @@ class StatisticsManager {
   /**
     * Retrieves the current statistics for the operator.
     * @param operator the operator executor
+    * @param inputBackpressureMetrics per input-port backpressure for this worker
     * @return a WorkerStatistics object containing the statistics
     */
-  def getStatistics(operator: OperatorExecutor): WorkerStatistics = {
+  def getStatistics(
+      operator: OperatorExecutor,
+      inputBackpressureMetrics: Seq[PortBackpressureMetrics] = Seq.empty
+  ): WorkerStatistics = {
     WorkerStatistics(
       inputStatistics.map {
         case (portId, (tupleCount, tupleSize)) =>
@@ -60,7 +65,8 @@ class StatisticsManager {
       }.toSeq,
       dataProcessingTime,
       controlProcessingTime,
-      totalExecutionTime - dataProcessingTime - controlProcessingTime
+      totalExecutionTime - dataProcessingTime - controlProcessingTime,
+      inputBackpressureMetrics
     )
   }
 
