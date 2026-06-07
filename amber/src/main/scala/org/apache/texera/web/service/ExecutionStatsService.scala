@@ -122,6 +122,11 @@ class ExecutionStatsService(
               val queuedBytesMap = metrics.operatorStatistics.inputBackpressureMetrics
                 .map(bp => bp.portId.id.toString -> bp.queuedCredit)
                 .toMap
+              // TEMP backpressure diagnostic (remove before finalizing)
+              if (metrics.operatorStatistics.inputBackpressureMetrics.nonEmpty)
+                logger.info(
+                  s"[BP-DEBUG] op=${x._1} util=$backpressureUtilMap queued=$queuedBytesMap"
+                )
 
               val res = OperatorAggregatedMetrics(
                 Utils.aggregatedStateToString(metrics.operatorState),

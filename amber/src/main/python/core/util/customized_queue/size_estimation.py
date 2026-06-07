@@ -15,12 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Centralized in-memory size estimation for queue items.
+"""In-memory size estimation for queue items.
 
-The size attributed to a queued item is reported upstream as flow-control
-credit. A shallow ``sys.getsizeof`` on the wrapper misses Arrow buffers (which
-live outside the wrapper object), so data payloads are sized by their frame's
-real buffer size and fall back to a shallow size only when nothing else exists.
+Sizes a data payload by its frame's real (Arrow) buffers, falling back to a
+shallow ``sys.getsizeof`` when no buffer-level size is available.
 """
 
 from __future__ import annotations

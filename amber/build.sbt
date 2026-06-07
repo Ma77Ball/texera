@@ -214,9 +214,19 @@ genPythonProto := {
         "Install protoc and `pip install betterproto[compiler]` before launching a Python worker or running pytest."
     )
   } else {
-    val procLogger = scala.sys.process.ProcessLogger(line => log.info(line), line => log.error(line))
+    // protoc-gen-python_betterproto writes its "Writing ..." progress to stderr,
+    // which is not an error. Buffer stderr and surface it as [error] only if the
+    // script actually fails; otherwise log it at info so a normal rebuild doesn't
+    // print alarming [error] lines.
+    val stderrBuf = scala.collection.mutable.ListBuffer.empty[String]
+    val procLogger = scala.sys.process.ProcessLogger(line => log.info(line), line => stderrBuf += line)
     val exit = scala.sys.process.Process(Seq("bash", script.getAbsolutePath), repoRoot).!(procLogger)
-    if (exit != 0) sys.error(s"python-proto-gen.sh failed with exit code $exit")
+    if (exit != 0) {
+      stderrBuf.foreach(log.error(_))
+      sys.error(s"python-proto-gen.sh failed with exit code $exit")
+    } else {
+      stderrBuf.foreach(log.info(_))
+    }
   }
 }
 Compile / compile := (Compile / compile).dependsOn(genPythonProto).value

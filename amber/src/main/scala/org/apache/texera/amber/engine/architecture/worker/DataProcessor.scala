@@ -101,13 +101,10 @@ class DataProcessor(
   def collectStatistics(): WorkerStatistics =
     statisticsManager.getStatistics(executor, collectInputBackpressure())
 
-  /**
-    * Per input-port backpressure: bytes queued in the receiver-side FIFOs vs.
-    * the total credit allowed, summed over the channels feeding each port.
-    */
+  /** Per input-port: bytes queued vs. total credit, summed over its channels. */
   private def collectInputBackpressure(): Seq[PortBackpressureMetrics] = {
     val maxCredit = ApplicationConfig.maxCreditAllowedInBytesPerChannel
-    inputGateway.getAllDataChannels
+    val result = inputGateway.getAllDataChannels
       .flatMap(channel => channel.getPortIdOpt.map(portId => (portId, channel.getQueuedCredit)))
       .toSeq
       .groupBy(_._1)
@@ -118,6 +115,15 @@ class DataProcessor(
           PortBackpressureMetrics(portId, entries.map(_._2).sum, portMax)
       }
       .toSeq
+    // TEMP backpressure diagnostic (remove before finalizing)
+    val _allCh = inputGateway.getAllDataChannels.toSeq
+    logger.info(
+      s"[BP-DEBUG-WORKER] dataChannels=${_allCh.size} " +
+        s"withPortId=${_allCh.count(_.getPortIdOpt.isDefined)} " +
+        s"queued=[${_allCh.map(_.getQueuedCredit).mkString(",")}] " +
+        s"metrics=[${result.map(m => s"p${m.portId.id}=${m.queuedCredit}/${m.maxCredit}").mkString(",")}]"
+    )
+    result
   }
 
   /**

@@ -17,11 +17,11 @@
  * under the License.
  */
 
-import { version } from "../../package.json";
+import packagejson from "../../package.json";
 
 // Dev placeholder. Production builds replace this file with the generated
 // version.prod.ts (see angular.json fileReplacements + frontend/build-version.js).
 export const Version = {
   buildNumber: "dev",
-  version,
+  version: packagejson.version,
 };

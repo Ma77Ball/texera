@@ -335,8 +335,7 @@ export class WorkflowEditorComponent implements OnInit, AfterViewInit, OnDestroy
             );
           });
 
-        // Color each edge by the backpressure on its target operator's input
-        // port (keyed by numeric port suffix, matching the backend stats keys).
+        // Color each edge by its target operator's input-port backpressure.
         this.workflowActionService
           .getTexeraGraph()
           .getAllLinks()
