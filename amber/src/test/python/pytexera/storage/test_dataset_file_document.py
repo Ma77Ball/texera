@@ -18,13 +18,25 @@
 import io
 
 import pytest
+import requests
 from unittest.mock import patch, MagicMock
 
-from pytexera.storage.dataset_file_document import DatasetFileDocument
+from pytexera.storage.dataset_file_document import (
+    DatasetFileDocument,
+    _HTTP_TIMEOUT,
+    _MAX_RETRIES,
+)
 
 
 DEFAULT_ENDPOINT = "http://localhost:9092/api/dataset/presign-download"
 CUSTOM_ENDPOINT = "https://example.test/api/presign"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleep():
+    """Keep retry backoff from actually sleeping during tests."""
+    with patch("pytexera.storage.dataset_file_document.time.sleep"):
+        yield
 
 
 @pytest.fixture
@@ -214,3 +226,64 @@ class TestReadFile:
             doc.read_file()
             second_call_args, _ = mock_get.call_args_list[1]
             assert second_call_args[0] == "https://signed.test/x"
+
+
+class TestTimeoutAndRetry:
+    def _make_doc(self, monkeypatch):
+        monkeypatch.setenv("USER_JWT_TOKEN", "test-jwt-token")
+        monkeypatch.setenv("FILE_SERVICE_GET_PRESIGNED_URL_ENDPOINT", CUSTOM_ENDPOINT)
+        return DatasetFileDocument("/bob@x.com/ds/v1/file.csv")
+
+    def test_passes_bounded_timeout_to_request(self, monkeypatch):
+        doc = self._make_doc(monkeypatch)
+        with patch("pytexera.storage.dataset_file_document.requests.get") as mock_get:
+            mock_get.return_value = make_response(200, body={"presignedUrl": "u"})
+            doc.get_presigned_url()
+            _, kwargs = mock_get.call_args
+            assert kwargs["timeout"] == _HTTP_TIMEOUT
+
+    def test_retries_on_connection_error_then_succeeds(self, monkeypatch):
+        doc = self._make_doc(monkeypatch)
+        with patch("pytexera.storage.dataset_file_document.requests.get") as mock_get:
+            mock_get.side_effect = [
+                requests.ConnectionError("connection refused"),
+                make_response(200, body={"presignedUrl": "https://signed.test/x"}),
+            ]
+            assert doc.get_presigned_url() == "https://signed.test/x"
+            assert mock_get.call_count == 2
+
+    def test_retries_on_retryable_status_then_succeeds(self, monkeypatch):
+        doc = self._make_doc(monkeypatch)
+        with patch("pytexera.storage.dataset_file_document.requests.get") as mock_get:
+            mock_get.side_effect = [
+                make_response(503, body="unavailable"),
+                make_response(200, body={"presignedUrl": "https://signed.test/x"}),
+            ]
+            assert doc.get_presigned_url() == "https://signed.test/x"
+            assert mock_get.call_count == 2
+
+    def test_raises_after_exhausting_retries_on_timeout(self, monkeypatch):
+        doc = self._make_doc(monkeypatch)
+        with patch("pytexera.storage.dataset_file_document.requests.get") as mock_get:
+            mock_get.side_effect = requests.Timeout("read timed out")
+            with pytest.raises(RuntimeError, match="after .* attempts"):
+                doc.get_presigned_url()
+            assert mock_get.call_count == _MAX_RETRIES + 1
+
+    def test_returns_last_retryable_response_for_caller_to_handle(self, monkeypatch):
+        # An exhausted retryable status surfaces through the call site's own
+        # status check, not as a "failed to reach" error.
+        doc = self._make_doc(monkeypatch)
+        with patch("pytexera.storage.dataset_file_document.requests.get") as mock_get:
+            mock_get.return_value = make_response(503, body="unavailable")
+            with pytest.raises(RuntimeError, match=r"503.*unavailable"):
+                doc.get_presigned_url()
+            assert mock_get.call_count == _MAX_RETRIES + 1
+
+    def test_does_not_retry_on_client_error(self, monkeypatch):
+        doc = self._make_doc(monkeypatch)
+        with patch("pytexera.storage.dataset_file_document.requests.get") as mock_get:
+            mock_get.return_value = make_response(403, body="forbidden")
+            with pytest.raises(RuntimeError, match=r"403.*forbidden"):
+                doc.get_presigned_url()
+            assert mock_get.call_count == 1

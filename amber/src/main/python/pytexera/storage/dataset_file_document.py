@@ -18,7 +18,48 @@
 import io
 import os
 import requests
+import time
 import urllib.parse
+
+
+# (connect, read) timeouts in seconds for HTTP calls. Without these, a stalled
+# endpoint blocks the Python worker thread indefinitely.
+_HTTP_TIMEOUT = (5, 30)
+# Bounded retry for transient failures, with exponential backoff.
+_MAX_RETRIES = 3
+_BACKOFF_BASE_SECONDS = 0.5
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _get_with_retry(url: str, **kwargs) -> requests.Response:
+    """
+    Issue a GET with a bounded timeout, retrying transient failures (connection
+    errors, timeouts, and retryable 5xx/429 responses) with exponential backoff.
+
+    Returns the final Response so callers keep their own status handling. A
+    retryable status that survives all attempts is returned as-is; only network
+    errors that exhaust all attempts raise.
+    """
+    kwargs.setdefault("timeout", _HTTP_TIMEOUT)
+    last_error = None
+    last_response = None
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            response = requests.get(url, **kwargs)
+            if response.status_code not in _RETRYABLE_STATUS:
+                return response
+            last_response = response
+            last_error = f"status {response.status_code}"
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            last_response = None
+            last_error = exc
+        if attempt < _MAX_RETRIES:
+            time.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
+    if last_response is not None:
+        return last_response
+    raise RuntimeError(
+        f"Failed to reach {url} after {_MAX_RETRIES + 1} attempts: {last_error}"
+    )
 
 
 class DatasetFileDocument:
@@ -69,7 +110,9 @@ class DatasetFileDocument:
 
         params = {"filePath": encoded_file_path}
 
-        response = requests.get(self.presign_endpoint, headers=headers, params=params)
+        response = _get_with_retry(
+            self.presign_endpoint, headers=headers, params=params
+        )
 
         if response.status_code != 200:
             raise RuntimeError(
@@ -100,7 +143,7 @@ class DatasetFileDocument:
         :raises: RuntimeError if the retrieval fails.
         """
         presigned_url = self.get_presigned_url()
-        response = requests.get(presigned_url)
+        response = _get_with_retry(presigned_url)
 
         if response.status_code != 200:
             raise RuntimeError(
