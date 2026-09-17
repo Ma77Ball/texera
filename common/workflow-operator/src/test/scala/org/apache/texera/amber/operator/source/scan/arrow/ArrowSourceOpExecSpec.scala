@@ -112,4 +112,93 @@ class ArrowSourceOpExecSpec extends AnyFlatSpec with Matchers {
     val exec = new ArrowSourceOpExec(descString(writeArrowFile(Seq("a"))))
     noException should be thrownBy exec.close()
   }
+
+  // ----- columnar passthrough (produceColumnarBatch) -----
+
+  private val mixedSchema = Schema(
+    List(
+      new Attribute("id", AttributeType.INTEGER),
+      new Attribute("big", AttributeType.LONG),
+      new Attribute("amt", AttributeType.DOUBLE),
+      new Attribute("flag", AttributeType.BOOLEAN),
+      new Attribute("name", AttributeType.STRING)
+    )
+  )
+
+  private def writeArrowFileMulti(sch: Schema, batches: Seq[Seq[Array[Any]]]): File = {
+    val file = File.createTempFile("arrow-src-multi-", ".arrow")
+    file.deleteOnExit()
+    val allocator = new RootAllocator()
+    val root = VectorSchemaRoot.create(ArrowUtils.fromTexeraSchema(sch), allocator)
+    val out = new FileOutputStream(file)
+    val writer = new ArrowFileWriter(root, null, Channels.newChannel(out))
+    try {
+      writer.start()
+      batches.foreach { rows =>
+        root.allocateNew()
+        rows.zipWithIndex.foreach {
+          case (vals, i) =>
+            ArrowUtils.setTexeraTuple(Tuple.builder(sch).addSequentially(vals).build(), i, root)
+        }
+        root.setRowCount(rows.size)
+        writer.writeBatch()
+      }
+      writer.end()
+    } finally {
+      writer.close()
+      root.close()
+      allocator.close()
+      out.close()
+    }
+    file
+  }
+
+  // Decode a batch exactly as the engine does on the wire: serialize the root to Arrow IPC bytes
+  // (as OutputManager.emitColumnarBatch would) then deserialize downstream.
+  private def decodeViaWire(root: VectorSchemaRoot): List[Tuple] =
+    ArrowUtils.deserializeTuples(ArrowUtils.serializeRoot(root)).toList
+
+  it should "produce identical rows via columnar passthrough as the row path, across batches and types" in {
+    val b1 = Seq(
+      Array[Any](Int.box(1), Long.box(10L), Double.box(1.5), Boolean.box(true), "x"),
+      Array[Any](Int.box(2), Long.box(20L), Double.box(2.5), Boolean.box(false), "yy")
+    )
+    val b2 = Seq(Array[Any](Int.box(3), Long.box(30L), Double.box(3.5), Boolean.box(true), "zzz"))
+    val file = writeArrowFileMulti(mixedSchema, Seq(b1, b2))
+
+    val rowExec = new ArrowSourceOpExec(descString(file))
+    rowExec.open()
+    val rowRows =
+      try rowExec.produceTuple().map(_.asInstanceOf[Tuple].getFields.toSeq).toList
+      finally rowExec.close()
+
+    val colExec = new ArrowSourceOpExec(descString(file))
+    colExec.open()
+    val colRows =
+      try {
+        colExec
+          .produceColumnarBatch()
+          .getOrElse(fail("expected a columnar batch iterator"))
+          .flatMap { root =>
+            try decodeViaWire(root).map(_.getFields.toSeq)
+            finally root.close() // the engine closes each emitted root after send
+          }
+          .toList
+      } finally colExec.close()
+
+    colRows shouldBe rowRows
+    colRows should have size 3
+  }
+
+  it should "not produce a columnar batch (fall back to the row path) when offset or limit is set" in {
+    val file = writeArrowFile(Seq("a", "b", "c"))
+    val withOffset = new ArrowSourceOpExec(descString(file, offset = Some(1)))
+    withOffset.open()
+    try withOffset.produceColumnarBatch() shouldBe None
+    finally withOffset.close()
+    val withLimit = new ArrowSourceOpExec(descString(file, limit = Some(2)))
+    withLimit.open()
+    try withLimit.produceColumnarBatch() shouldBe None
+    finally withLimit.close()
+  }
 }

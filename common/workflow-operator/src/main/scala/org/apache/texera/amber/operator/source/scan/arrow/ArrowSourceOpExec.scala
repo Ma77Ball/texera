@@ -24,7 +24,7 @@ import org.apache.texera.amber.core.storage.DocumentFactory
 import org.apache.texera.amber.core.tuple.TupleLike
 import org.apache.texera.amber.util.ArrowUtils
 import org.apache.texera.amber.util.JSONUtils.objectMapper
-import org.apache.arrow.memory.RootAllocator
+import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.arrow.vector.ipc.ArrowFileReader
 
@@ -39,6 +39,8 @@ class ArrowSourceOpExec(
   private var reader: Option[ArrowFileReader] = None
   private var root: Option[VectorSchemaRoot] = None
   private var allocator: Option[RootAllocator] = None
+  // Separate allocator for the engine-owned batches yielded by produceColumnarBatch; freed in close().
+  private var columnarAllocator: Option[RootAllocator] = None
 
   override def open(): Unit = {
     try {
@@ -93,9 +95,69 @@ class ArrowSourceOpExec(
     tupleIterator
   }
 
+  /**
+    * Columnar passthrough: hand each Arrow record batch read from the file straight to the wire,
+    * with no per-row Tuple decode and no re-encode. The batch data is already Arrow, so we only
+    * copy it (column by column) into a fresh, engine-owned root - the engine closes each emitted
+    * root, while ArrowFileReader keeps reusing its own internal root across loadNextBatch(), so we
+    * cannot hand the reader's root out directly. offset/limit are not applied here (they would need
+    * cross-batch row slicing); when either is set we return None and the row path handles them.
+    */
+  override def produceColumnarBatch(): Option[Iterator[VectorSchemaRoot]] = {
+    if (desc.offset.isDefined || desc.limit.isDefined) return None
+    val arrowReader = reader.getOrElse(return None)
+    val srcRoot = root.getOrElse(return None)
+    val alloc = new RootAllocator()
+    columnarAllocator = Some(alloc)
+
+    Some(new Iterator[VectorSchemaRoot] {
+      private var hasBatch = arrowReader.loadNextBatch()
+
+      override def hasNext: Boolean = hasBatch
+
+      override def next(): VectorSchemaRoot = {
+        val batch = ArrowSourceOpExec.copyRoot(srcRoot, alloc)
+        hasBatch = arrowReader.loadNextBatch()
+        batch
+      }
+    })
+  }
+
   override def close(): Unit = {
     reader.foreach(_.close())
     root.foreach(_.close())
     allocator.foreach(_.close())
+    columnarAllocator.foreach(_.close())
+  }
+}
+
+object ArrowSourceOpExec {
+
+  /**
+    * Copies a VectorSchemaRoot into a fresh root owned by `allocator`, column by column. This is a
+    * columnar copy (no boxed Tuple objects, no per-field decode/encode): far cheaper than
+    * materializing rows, and it leaves the source root intact for the reader's next batch.
+    */
+  private def copyRoot(src: VectorSchemaRoot, allocator: BufferAllocator): VectorSchemaRoot = {
+    val dest = VectorSchemaRoot.create(src.getSchema, allocator)
+    val rowCount = src.getRowCount
+    val srcVectors = src.getFieldVectors
+    val dstVectors = dest.getFieldVectors
+    var c = 0
+    while (c < srcVectors.size) {
+      val s = srcVectors.get(c)
+      val d = dstVectors.get(c)
+      d.setInitialCapacity(rowCount)
+      d.allocateNew()
+      var r = 0
+      while (r < rowCount) {
+        d.copyFromSafe(r, r, s)
+        r += 1
+      }
+      d.setValueCount(rowCount)
+      c += 1
+    }
+    dest.setRowCount(rowCount)
+    dest
   }
 }
