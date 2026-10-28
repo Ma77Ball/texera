@@ -39,10 +39,10 @@ export default defineConfig({
     // test that takes ~400ms on ubuntu has been observed at 11s+ in a
     // beforeEach on a loaded macOS runner, and the leg was failing on pure
     // timeouts in a different spec nearly every time (#7713). These limits are
-    // 4x/3x the defaults; a genuinely hung test still fails, 15–20 seconds
+    // 6x the defaults; a genuinely hung test still fails, 25–50 seconds
     // later on a 9–17 minute leg.
-    testTimeout: 20000,
-    hookTimeout: 30000,
+    testTimeout: 30000,
+    hookTimeout: 60000,
     // Each spec file runs in a forked worker, and Vitest rebuilds that worker's
     // execArgv from scratch, keeping only the profiling flags -- so the
     // --max-old-space-size in `test:ci`, which predates the Karma -> Vitest
