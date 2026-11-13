@@ -21,7 +21,7 @@ package org.apache.texera.amber.operator.aggregate
 
 import com.fasterxml.jackson.annotation.{JsonIgnore, JsonProperty, JsonPropertyDescription}
 import com.kjetland.jackson.jsonSchema.annotations.{JsonSchemaInject, JsonSchemaTitle}
-import org.apache.texera.amber.core.tuple.{Attribute, AttributeType, AttributeTypeUtils, Tuple}
+import org.apache.texera.amber.core.tuple.{Attribute, AttributeType, AttributeTypeUtils}
 import org.apache.texera.amber.operator.metadata.annotations.AutofillAttributeName
 
 import javax.validation.constraints.NotNull
@@ -146,12 +146,10 @@ class AggregationOperation {
     }
     new DistributedAggregation[Object](
       () => AttributeTypeUtils.zeroValue(attributeType),
-      (partial, tuple) => {
-        val value = tuple.getField[Object](attribute)
-        AttributeTypeUtils.add(partial, value, attributeType)
-      },
+      (partial, value) => AttributeTypeUtils.add(partial, value, attributeType),
       (partial1, partial2) => AttributeTypeUtils.add(partial1, partial2, attributeType),
-      partial => partial
+      partial => partial,
+      tuple => tuple.getField[Object](attribute)
     )
   }
 
@@ -161,24 +159,19 @@ class AggregationOperation {
     val countAllRows = attribute == null || attribute.trim.isEmpty
     new DistributedAggregation[Integer](
       () => 0,
-      (partial, tuple) =>
-        partial + (if (countAllRows || tuple.getField(attribute) != null) 1 else 0),
+      (partial, value) => partial + (if (countAllRows || value != null) 1 else 0),
       (partial1, partial2) => partial1 + partial2,
-      partial => partial
+      partial => partial,
+      tuple => if (countAllRows) null else tuple.getField(attribute)
     )
   }
 
   private def concatAgg(): DistributedAggregation[String] = {
     new DistributedAggregation[String](
       () => "",
-      (partial, tuple) => {
-        if (partial == "") {
-          if (tuple.getField(attribute) != null) tuple.getField(attribute).toString else ""
-        } else {
-          partial + "," + (if (tuple.getField(attribute) != null)
-                             tuple.getField(attribute).toString
-                           else "")
-        }
+      (partial, value) => {
+        val s = if (value != null) value.toString else ""
+        if (partial == "") s else partial + "," + s
       },
       (partial1, partial2) => {
         if (partial1 != "" && partial2 != "") {
@@ -187,7 +180,8 @@ class AggregationOperation {
           partial1 + partial2
         }
       },
-      partial => partial
+      partial => partial,
+      tuple => tuple.getField[Object](attribute)
     )
   }
 
@@ -204,15 +198,15 @@ class AggregationOperation {
     }
     new DistributedAggregation[Object](
       () => AttributeTypeUtils.maxValue(attributeType),
-      (partial, tuple) => {
-        val value = tuple.getField[Object](attribute)
+      (partial, value) => {
         val comp = AttributeTypeUtils.compare(value, partial, attributeType)
         if (value != null && comp < 0) value else partial
       },
       (partial1, partial2) =>
         if (AttributeTypeUtils.compare(partial1, partial2, attributeType) < 0) partial1
         else partial2,
-      partial => if (partial == AttributeTypeUtils.maxValue(attributeType)) null else partial
+      partial => if (partial == AttributeTypeUtils.maxValue(attributeType)) null else partial,
+      tuple => tuple.getField[Object](attribute)
     )
   }
 
@@ -229,36 +223,36 @@ class AggregationOperation {
     }
     new DistributedAggregation[Object](
       () => AttributeTypeUtils.minValue(attributeType),
-      (partial, tuple) => {
-        val value = tuple.getField[Object](attribute)
+      (partial, value) => {
         val comp = AttributeTypeUtils.compare(value, partial, attributeType)
         if (value != null && comp > 0) value else partial
       },
       (partial1, partial2) =>
         if (AttributeTypeUtils.compare(partial1, partial2, attributeType) > 0) partial1
         else partial2,
-      partial => if (partial == AttributeTypeUtils.minValue(attributeType)) null else partial
+      partial => if (partial == AttributeTypeUtils.minValue(attributeType)) null else partial,
+      tuple => tuple.getField[Object](attribute)
     )
   }
 
-  private def getNumericalValue(tuple: Tuple): Option[Double] = {
-    val value: Object = tuple.getField(attribute)
-    if (value == null)
-      return None
-
-    if (tuple.getSchema.getAttribute(attribute).getType == AttributeType.TIMESTAMP)
-      Option(AttributeTypeUtils.parseTimestamp(value.toString).getTime.toDouble)
-    else Option(value.toString.toDouble)
-  }
+  // Numerical reading of one already-extracted value. A timestamp counts as its
+  // epoch milliseconds; any other value parses through its string form. null (an
+  // absent value) is None, so it is skipped by the average.
+  private def numericalValue(value: Object): Option[Double] =
+    value match {
+      case null                   => None
+      case ts: java.sql.Timestamp => Option(ts.getTime.toDouble)
+      case other                  => Option(other.toString.toDouble)
+    }
 
   private def averageAgg(): DistributedAggregation[AveragePartialObj] = {
     new DistributedAggregation[AveragePartialObj](
       () => AveragePartialObj(0, 0),
-      (partial, tuple) => {
-        val value = getNumericalValue(tuple)
+      (partial, value) => {
+        val num = numericalValue(value)
         AveragePartialObj(
-          partial.sum + (if (value.isDefined) value.get else 0),
-          partial.count + (if (value.isDefined) 1 else 0)
+          partial.sum + num.getOrElse(0d),
+          partial.count + (if (num.isDefined) 1 else 0)
         )
       },
       (partial1, partial2) =>
@@ -266,7 +260,8 @@ class AggregationOperation {
       partial => {
         val ret: java.lang.Double = if (partial.count == 0d) null else partial.sum / partial.count
         ret
-      }
+      },
+      tuple => tuple.getField[Object](attribute)
     )
   }
 }
