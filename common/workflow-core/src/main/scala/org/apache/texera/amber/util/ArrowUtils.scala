@@ -96,10 +96,35 @@ object ArrowUtils extends LazyLogging {
     try {
       val out = scala.collection.mutable.ArrayBuffer[Tuple]()
       val root = reader.getVectorSchemaRoot
+      // Resolved once per stream and reused per row: the Texera schema, the field
+      // vectors as a plain array, and each column's attribute type. Rebuilding these
+      // per row (an Arrow-to-Texera schema conversion plus collection allocation) was
+      // the dominant decode cost.
+      var schema: Schema = null
+      var vecs: Array[FieldVector] = null
+      var types: Array[AttributeType] = null
+      var numCols = 0
       while (reader.loadNextBatch()) {
+        if (schema == null) {
+          schema = toTexeraSchema(root.getSchema)
+          val fv = root.getFieldVectors
+          numCols = fv.size
+          vecs = new Array[FieldVector](numCols)
+          types = new Array[AttributeType](numCols)
+          var c = 0
+          while (c < numCols) {
+            vecs(c) = fv.get(c); types(c) = schema.getAttributes(c).getType; c += 1
+          }
+        }
         val n = root.getRowCount
         var i = 0
-        while (i < n) { out += getTexeraTuple(i, root); i += 1 }
+        while (i < n) {
+          val values = new Array[Any](numCols)
+          var c = 0
+          while (c < numCols) { values(c) = getCell(vecs(c), i, types(c)); c += 1 }
+          out += Tuple(schema, values)
+          i += 1
+        }
       }
       out.toArray
     } finally reader.close()
@@ -204,10 +229,19 @@ object ArrowUtils extends LazyLogging {
   def getTexeraTuple(
       rowIndex: Int,
       vectorSchemaRoot: VectorSchemaRoot
-  ): Tuple = {
-    val arrowSchema = vectorSchemaRoot.getSchema
-    val schema = toTexeraSchema(arrowSchema)
+  ): Tuple = getTexeraTuple(rowIndex, vectorSchemaRoot, toTexeraSchema(vectorSchemaRoot.getSchema))
 
+  /**
+    * As [[getTexeraTuple(rowIndex,vectorSchemaRoot)]], but with the Texera schema
+    * resolved by the caller. Decoding a whole batch resolves the schema once and
+    * reuses it per row, instead of rebuilding it (an Arrow-to-Texera schema
+    * conversion) for every row.
+    */
+  def getTexeraTuple(
+      rowIndex: Int,
+      vectorSchemaRoot: VectorSchemaRoot,
+      schema: Schema
+  ): Tuple = {
     Tuple
       .builder(schema)
       .addSequentially(
