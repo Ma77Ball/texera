@@ -1,0 +1,31 @@
+appId: org.apache.texera.controlpanel
+productName: Texera Control Panel
+copyright: Apache Software Foundation
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+# Bundle the single-node deploy context so the panel can run docker compose offline.
+extraResources:
+  - from: ../bin/single-node
+    to: single-node
+    filter:
+      - "**/*.yml"
+      - "**/*.yaml"
+      - "**/*.conf"
+      - "**/*.env"
+      - ".env*"
+  - from: ../bin/observability
+    to: observability
+win:
+  target:
+    - nsis
+  artifactName: TexeraSetup-${version}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Texera Control Panel

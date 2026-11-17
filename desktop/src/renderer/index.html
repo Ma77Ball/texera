@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+    <title>Texera Control Panel</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body { font-family: system-ui, Segoe UI, sans-serif; margin: 0; padding: 20px; }
+      h1 { font-size: 18px; margin: 0 0 4px; }
+      .sub { color: #666; font-size: 12px; margin-bottom: 16px; }
+      .row { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+      button { padding: 8px 14px; border-radius: 6px; border: 1px solid #888; background: #0F766E; color: #fff; cursor: pointer; font-size: 13px; }
+      button.secondary { background: transparent; color: inherit; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; border: 1px solid #888; }
+      .pill.running { border-color: #1B7F3B; color: #1B7F3B; }
+      .pill.starting { border-color: #B0851E; color: #B0851E; }
+      .pill.stopped { border-color: #B0451E; color: #B0451E; }
+      .banner { padding: 10px 12px; border: 1px solid #B0451E; border-radius: 6px; margin-bottom: 14px; font-size: 13px; }
+      ul { list-style: none; padding: 0; margin: 0; }
+      li.svc { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 13px; }
+      .dot { width: 9px; height: 9px; border-radius: 50%; background: #B0451E; flex: none; }
+      .dot.ok { background: #1B7F3B; }
+      .dot.warn { background: #B0851E; }
+      .links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+      h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; color: #888; margin: 18px 0 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>Texera Control Panel</h1>
+    <div class="sub">Set up, start, and monitor Texera on this machine.</div>
+
+    <div id="docker-banner" class="banner" hidden></div>
+
+    <div class="row">
+      <span>Stack:</span>
+      <span id="status" class="pill stopped">checking...</span>
+      <button id="start">Start Texera</button>
+      <button id="stop" class="secondary">Stop</button>
+      <label style="font-size:12px"><input type="checkbox" id="obs" checked /> with observability</label>
+    </div>
+
+    <h2>Open</h2>
+    <div id="links" class="links"></div>
+
+    <h2>Services</h2>
+    <ul id="services"><li class="svc">Loading...</li></ul>
+
+    <script>
+      const api = window.texera;
+      const $ = id => document.getElementById(id);
+
+      async function renderLinks() {
+        const dashboards = await api.dashboards();
+        $("links").innerHTML = "";
+        for (const d of dashboards) {
+          const b = document.createElement("button");
+          b.className = "secondary";
+          b.textContent = d.label;
+          b.onclick = () => api.open(d.url);
+          $("links").appendChild(b);
+        }
+      }
+
+      function healthClass(c) {
+        if (c.state !== "running") return "";
+        if (c.health === "starting") return "warn";
+        return "ok";
+      }
+
+      async function refresh() {
+        const s = await api.state();
+        const banner = $("docker-banner");
+        if (!s.dockerInstalled) {
+          banner.hidden = false;
+          banner.innerHTML = "Docker Desktop is not installed. ";
+          const a = document.createElement("button");
+          a.textContent = "Get Docker Desktop";
+          a.onclick = () => api.openDockerInstall();
+          banner.appendChild(a);
+        } else if (!s.dockerRunning) {
+          banner.hidden = false;
+          banner.textContent = "Docker Desktop is installed but not running. Start Docker Desktop, then click Start Texera.";
+        } else {
+          banner.hidden = true;
+        }
+
+        const pill = $("status");
+        pill.className = "pill " + s.status;
+        pill.textContent = s.status;
+        $("start").disabled = !s.dockerRunning || s.status !== "stopped";
+        $("stop").disabled = !s.dockerRunning || s.status === "stopped";
+
+        const ul = $("services");
+        if (s.containers.length === 0) {
+          ul.innerHTML = "<li class='svc'>No running containers.</li>";
+        } else {
+          ul.innerHTML = "";
+          for (const c of s.containers) {
+            const li = document.createElement("li");
+            li.className = "svc";
+            li.innerHTML = "<span class='dot " + healthClass(c) + "'></span>" +
+              (c.service || c.name) + " <span style='color:#888'>" + c.state +
+              (c.health ? " / " + c.health : "") + "</span>";
+            ul.appendChild(li);
+          }
+        }
+      }
+
+      $("start").onclick = async () => { $("start").disabled = true; try { await api.start(); } catch (e) { alert("Start failed: " + e); } refresh(); };
+      $("stop").onclick = async () => { $("stop").disabled = true; try { await api.stop(); } catch (e) { alert("Stop failed: " + e); } refresh(); };
+      $("obs").onchange = e => api.setObservability(e.target.checked);
+
+      renderLinks();
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>
