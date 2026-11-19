@@ -25,9 +25,9 @@ test("buildComposeArgs wires project, files, and sub-command in order", () => {
     "-p",
     "texera-single-node",
     "-f",
-    "docker-compose.yml",
+    "/opt/texera/single-node/docker-compose.yml",
     "-f",
-    "docker-compose.observability.yml",
+    "/opt/texera/single-node/docker-compose.observability.yml",
     "up",
     "-d"
   ]);
@@ -35,7 +35,7 @@ test("buildComposeArgs wires project, files, and sub-command in order", () => {
 
 test("buildComposeArgs drops the overlay when observability is off", () => {
   const args = buildComposeArgs({ ...opts, withObservability: false }, ["down"]);
-  assert.deepEqual(args, ["compose", "-p", "texera-single-node", "-f", "docker-compose.yml", "down"]);
+  assert.deepEqual(args, ["compose", "-p", "texera-single-node", "-f", "/opt/texera/single-node/docker-compose.yml", "down"]);
 });
 
 test("parseComposePs handles NDJSON output", () => {
@@ -54,6 +54,12 @@ test("parseComposePs handles a JSON array", () => {
   const rows = parseComposePs(out);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].health, "starting");
+});
+
+test("parseComposePs extracts published ports from Publishers", () => {
+  const out = '{"Name":"db","Service":"db","State":"running","Publishers":[{"PublishedPort":18080,"TargetPort":8080},{"PublishedPort":0,"TargetPort":9}]}';
+  const rows = parseComposePs(out);
+  assert.equal(rows[0].ports, "18080:8080");
 });
 
 test("parseComposePs ignores blank and malformed lines", () => {

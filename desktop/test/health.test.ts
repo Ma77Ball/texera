@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { ContainerHealth, overallStatus } from "../src/main/compose";
 
 function c(state: string, health = ""): ContainerHealth {
-  return { name: "x", service: "x", state, health };
+  return { name: "x", service: "x", state, health, ports: "" };
 }
 
 test("overallStatus is stopped when nothing runs", () => {

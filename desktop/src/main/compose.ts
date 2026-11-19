@@ -1,6 +1,8 @@
 // Pure helpers for building `docker compose` commands and parsing their output.
 // Kept free of Electron and child_process so it is unit-testable in plain Node.
 
+import * as path from "node:path";
+
 export interface ComposeOptions {
   projectName: string;
   composeDir: string;
@@ -12,6 +14,7 @@ export interface ContainerHealth {
   service: string;
   state: string;
   health: string;
+  ports: string;
 }
 
 export type StackStatus = "stopped" | "starting" | "running";
@@ -27,7 +30,7 @@ export function composeFiles(withObservability: boolean): string[] {
 export function buildComposeArgs(opts: ComposeOptions, sub: string[]): string[] {
   const args = ["compose", "-p", opts.projectName];
   for (const file of composeFiles(opts.withObservability)) {
-    args.push("-f", file);
+    args.push("-f", path.join(opts.composeDir, file));
   }
   return args.concat(sub);
 }
@@ -50,12 +53,22 @@ export function parseComposePs(stdout: string): ContainerHealth[] {
       }
     }
   }
-  return rows.map(row => ({
-    name: String(row.Name ?? row.name ?? ""),
-    service: String(row.Service ?? row.service ?? ""),
-    state: String(row.State ?? row.state ?? ""),
-    health: String(row.Health ?? row.health ?? "")
-  }));
+  return rows.map(row => {
+    const pubs = Array.isArray((row as { Publishers?: unknown }).Publishers)
+      ? ((row as { Publishers: Array<{ PublishedPort?: number; TargetPort?: number }> }).Publishers)
+      : [];
+    const ports = pubs
+      .filter(p => p.PublishedPort)
+      .map(p => `${p.PublishedPort}:${p.TargetPort}`)
+      .join(", ") || String(row.Ports ?? row.ports ?? "");
+    return {
+      name: String(row.Name ?? row.name ?? ""),
+      service: String(row.Service ?? row.service ?? ""),
+      state: String(row.State ?? row.state ?? ""),
+      health: String(row.Health ?? row.health ?? ""),
+      ports
+    };
+  });
 }
 
 // Collapse per-container health into one stack status for the UI.

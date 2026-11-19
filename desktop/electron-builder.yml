@@ -3,9 +3,13 @@ productName: Texera Control Panel
 copyright: Apache Software Foundation
 directories:
   output: release
+  buildResources: build
 files:
   - dist/**/*
   - package.json
+# node-pty ships a native binary that must stay outside the asar to load at runtime.
+asarUnpack:
+  - "**/node_modules/node-pty/**"
 # Bundle the single-node deploy context so the panel can run docker compose offline.
 extraResources:
   - from: ../bin/single-node
@@ -18,10 +22,23 @@ extraResources:
       - ".env*"
   - from: ../bin/observability
     to: observability
+# One scheme across every OS; ${ext} resolves to exe/dmg/AppImage/deb per target.
+artifactName: Texera-Control-Panel-${version}-${os}-${arch}.${ext}
 win:
   target:
     - nsis
-  artifactName: TexeraSetup-${version}.${ext}
+    - portable
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - dmg
+    - zip
+linux:
+  category: Development
+  maintainer: Apache Texera <dev@texera.apache.org>
+  target:
+    - AppImage
+    - deb
 nsis:
   oneClick: false
   perMachine: false
