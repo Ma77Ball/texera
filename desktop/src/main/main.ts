@@ -2,7 +2,7 @@
 
 import { app, BrowserWindow, Menu, clipboard, ipcMain, shell } from "electron";
 import * as path from "node:path";
-import { ComposeOptions, buildComposeArgs } from "./compose";
+import { ComposeOptions, buildComposeArgs, overallStatus } from "./compose";
 import { composeDown, composeLogs, composeUp, dockerEnv, getStackState, serviceAction } from "./docker";
 import { DASHBOARDS, SERVICE_GROUP_ORDER, classifyService } from "./services";
 import { createSession, killAll, killSession, resizeSession, writeSession, PtySpawn } from "./pty";
@@ -39,7 +39,11 @@ function ptySpec(kind: string, service: string, cols: number, rows: number): Pty
   const base = { cwd: composeDir(), env: dockerEnv(), cols, rows };
   if (kind === "service-shell") return { ...base, file: "docker", args: buildComposeArgs(options(), ["exec", service, "sh"]) };
   if (kind === "logs") return { ...base, file: "docker", args: buildComposeArgs(options(), ["logs", "-f", "--tail", "200", service]) };
-  if (kind === "stats") return { ...base, file: "docker", args: ["stats"] };
+  if (kind === "stats") {
+    if (process.platform === "win32") return { ...base, file: "docker", args: ["stats"] };
+    // Clear the screen and reprint a fresh snapshot each tick so the pane does not accumulate rows.
+    return { ...base, file: "sh", args: ["-c", "while true; do printf '\\033[2J\\033[3J\\033[H'; docker stats --no-stream; sleep 2; done"] };
+  }
   const sh = defaultShell();
   return { ...base, file: sh.file, args: sh.args };
 }
@@ -75,7 +79,9 @@ function registerIpc(): void {
   ipcMain.handle("state", async () => {
     const s = await getStackState(options());
     const containers = s.containers.map(c => ({ ...c, ...classifyService(c.service || c.name) }));
-    return { ...s, groupOrder: SERVICE_GROUP_ORDER, containers };
+    // Status reflects Texera's own services; the optional observability stack does not count as "running".
+    const status = overallStatus(containers.filter(c => c.group !== "Observability"));
+    return { ...s, status, groupOrder: SERVICE_GROUP_ORDER, containers };
   });
   ipcMain.handle("set-observability", (_e, value: boolean) => {
     withObservability = Boolean(value);
